@@ -1,5 +1,7 @@
 {:paths ["src" "resources"]
- :deps {}
+ :deps {io.github.kotoba-lang/transit
+        {:git/url "https://github.com/kotoba-lang/transit.git"
+         :git/sha "77e3ce7d1b5271440f56aa77cea0fd6e77b88eac"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

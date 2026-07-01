@@ -5,7 +5,9 @@
   ([id attrs]
    (merge {:sheets/id id
            :sheets/type :workbook
-           :sheets/tabs {}}
+           :sheets/tabs {}
+           :sheets/named-ranges {}
+           :sheets/charts []}
           attrs)))
 
 (defn tab
@@ -25,11 +27,21 @@
 (defn put-formula [tab row col expr]
   (assoc-in tab [:sheets/cells (cell-key row col)] {:sheets/formula expr}))
 
+(defn put-cell-style [tab row col style]
+  (assoc-in tab [:sheets/cells (cell-key row col) :sheets/style] style))
+
 (defn get-cell [tab row col]
   (get-in tab [:sheets/cells (cell-key row col)]))
 
 (defn add-tab [wb t]
   (assoc-in wb [:sheets/tabs (:sheets/id t)] t))
+
+(defn add-named-range [wb id attrs]
+  (assoc-in wb [:sheets/named-ranges id]
+            (merge {:sheets/id id} attrs)))
+
+(defn add-chart [wb chart]
+  (update wb :sheets/charts conj chart))
 
 (defn tab-by-id [wb id]
   (get-in wb [:sheets/tabs id]))
