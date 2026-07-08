@@ -9,3 +9,5 @@ jobs:
         with:
           cli: latest
       - run: clojure -X:test
+
+      - run: clojure -M:lint
