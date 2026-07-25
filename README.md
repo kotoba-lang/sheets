@@ -21,3 +21,17 @@ ranges, and chart descriptors. The shared wire format is Kotoba Transit JSON via
 ```bash
 clojure -X:test
 ```
+
+## Kotoba bounded profile
+
+`src/sheets/bounded_cells.kotoba` is a capability-free port of a single
+tab's cell table, scoped to string-valued cells keyed by a bounded
+`{:row :col}` integer coordinate — the shape `sheets.model-test`'s own
+`workbook-model` fixture exercises. It uses `kotoba-lang/compiler`'s
+canonical bounded typed-map (`[:map [:record :sheets/coord …] :string]`,
+up to 31 entries) with a **record key** — the same primitive already
+production-qualified by `kotoba-lang/crdt` and by the sibling
+`kotoba-lang/states` bounded-model migration. Formulas, styles, named
+ranges, charts, the workbook/tab container, `range-values`, the validator,
+and the Transit wire envelope stay in the CLJC oracle (`sheets.model` /
+`sheets.wire`). See [migration/bounded-cell-table-v1.edn](migration/bounded-cell-table-v1.edn).

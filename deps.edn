@@ -3,7 +3,13 @@
         {:git/url "https://github.com/kotoba-lang/transit.git"
          :git/sha "77e3ce7d1b5271440f56aa77cea0fd6e77b88eac"}}
  :aliases
- {:test {:extra-paths ["test"]
+ {;; Bounded Kotoba profile (sheets.bounded-cells). :replace-paths/:replace-deps
+  ;; so the compiler's classpath scan doesn't inherit the base :deps.
+  :kotoba {:replace-paths ["src"]
+           :replace-deps {io.github.kotoba-lang/compiler
+                          {:git/sha "f6ee539e23a967c25893361c4746746e623e8bd4"}}
+           :main-opts ["-m" "kotoba.compiler.cli"]}
+  :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :main-opts ["-m" "cognitect.test-runner"]
