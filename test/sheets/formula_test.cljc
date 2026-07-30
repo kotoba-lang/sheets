@@ -125,3 +125,93 @@
   (doseq [expr ["" "=" "((((" ")))" "SUM(" "SUM()" "1..2" "@@@" "A" "1:2"
                 "SUM(B2:B3" "\"unterminated" "B2 B3" "----1"]]
     (is (string? (one expr)) (pr-str expr))))
+
+;; ── IF chooses before it computes ───────────────────────────────────────────
+
+(deftest if-does-not-compute-the-branch-it-did-not-choose
+  ;; The thing IF is most used for. Evaluating both branches makes
+  ;; `IF(A1=0,"ゼロ",100/A1)` come to #DIV/0! — the error the guard exists to
+  ;; avoid — which is what it did before this was fixed.
+  (let [tab (-> (m/tab "t" {})
+                (m/put-cell 1 1 "0")
+                (m/put-cell 2 1 "4"))]
+    (is (= "ゼロ" (f/value-at (m/put-formula tab 3 1 "IF(A1=0,\"ゼロ\",100/A1)") 3 1)))
+    (is (= "25" (f/value-at (m/put-formula tab 3 1 "IF(A2=0,\"ゼロ\",100/A2)") 3 1)))
+    ;; Not only division: an unknown function in the branch not taken is
+    ;; also not evaluated.
+    (is (= "0" (f/value-at (m/put-formula tab 3 1 "IF(A1=0,0,ZZZ(1))") 3 1)))
+    ;; An error in the *condition* is still the answer.
+    (is (= "#DIV/0!" (f/value-at (m/put-formula tab 3 1 "IF(1/0=1,\"a\",\"b\")") 3 1)))))
+
+(deftest what-counts-as-true
+  (let [tab (-> (m/tab "t" {})
+                (m/put-cell 1 1 "0") (m/put-cell 2 1 "5")
+                (m/put-cell 3 1 "") (m/put-cell 4 1 "文字"))
+        if-of (fn [expr] (f/value-at (m/put-formula tab 9 1
+                                                    (str "IF(" expr ",\"y\",\"n\")"))
+                                     9 1))]
+    (is (= "n" (if-of "A1")) "zero is false")
+    (is (= "y" (if-of "A2")) "a non-zero number is true")
+    (is (= "n" (if-of "A3")) "empty is false")
+    (is (= "y" (if-of "A4")) "text is true")
+    (is (= "y" (if-of "A2>1")))
+    (is (= "n" (if-of "A2>10")))))
+
+;; ── the functions that make it useful ───────────────────────────────────────
+
+(defn- ledger
+  "Q1..Q3 in column A, amounts in column B."
+  [& formulas]
+  (reduce (fn [tab [row expr]] (m/put-formula tab row 4 expr))
+          (-> (m/tab "t" {})
+              (m/put-cell 1 1 "Q1") (m/put-cell 1 2 "1200")
+              (m/put-cell 2 1 "Q2") (m/put-cell 2 2 "800")
+              (m/put-cell 3 1 "Q3") (m/put-cell 3 2 "1500"))
+          (partition 2 formulas)))
+
+(defn- calc [expr] (f/value-at (ledger 9 expr) 9 4))
+
+(deftest conditional-aggregates
+  (is (= "2" (calc "COUNTIF(B1:B3,\">1000\")")))
+  (is (= "1" (calc "COUNTIF(A1:A3,\"Q2\")")))
+  (is (= "2" (calc "COUNTIF(A1:A3,\"<>Q2\")")))
+  ;; One range: total the values that match themselves.
+  (is (= "2700" (calc "SUMIF(B1:B3,\">1000\")")))
+  ;; Two ranges: test one column, total another — which is what the third
+  ;; argument is for and the shape a real ledger has.
+  (is (= "800" (calc "SUMIF(A1:A3,\"Q2\",B1:B3)")))
+  (is (= "2700" (calc "SUMIF(A1:A3,\"<>Q2\",B1:B3)")))
+  ;; A criterion matching nothing totals nothing rather than erroring.
+  (is (= "0" (calc "SUMIF(A1:A3,\"Q9\",B1:B3)"))))
+
+(deftest text-functions
+  (is (= "2" (calc "LEN(A1)")))
+  (is (= "Q" (calc "LEFT(A1,1)")))
+  (is (= "1" (calc "RIGHT(A1,1)")))
+  (is (= "1" (calc "MID(A1,2,1)")))
+  (is (= "q1" (calc "LOWER(A1)")))
+  (is (= "Q1" (calc "UPPER(\"q1\")")))
+  (is (= "Q1-1200" (calc "CONCATENATE(A1,\"-\",B1)")))
+  (is (= "abc" (calc "TRIM(\"  abc  \")")))
+  ;; Asking for more characters than there are gives what there is, rather
+  ;; than an index error.
+  (is (= "Q1" (calc "LEFT(A1,99)")))
+  (is (= "Q1" (calc "RIGHT(A1,99)")))
+  (is (= "" (calc "MID(A1,99,5)"))))
+
+(deftest logic-functions
+  (is (= "TRUE" (calc "AND(B1>1000,B3>1000)")))
+  (is (= "FALSE" (calc "AND(B1>1000,B2>1000)")))
+  (is (= "TRUE" (calc "OR(B1>1000,B2>1000)")))
+  (is (= "FALSE" (calc "OR(B2>1000,B2>2000)")))
+  (is (= "TRUE" (calc "NOT(B2>1000)")))
+  ;; Unlike IF, these evaluate everything — so an error in any argument is
+  ;; the answer, which is Excel's behaviour too.
+  (is (= "#DIV/0!" (calc "OR(B1>1000,1/0=1)"))))
+
+(deftest a-criterion-is-a-string-and-that-is-a-convention
+  ;; `>1000` as a *value* is not a criterion the way `">1000"` as a
+  ;; criterion is. The operator being part of the string is a spreadsheet
+  ;; convention rather than a general one, and worth a test saying so.
+  (is (= "2" (calc "COUNTIF(B1:B3,\">1000\")")))
+  (is (= "0" (calc "COUNTIF(B1:B3,\"1000\")")) "equality, and nothing equals 1000"))

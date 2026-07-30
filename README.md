@@ -123,9 +123,28 @@ a total that silently omitted it would be a number nobody can see is wrong.
 A cell that refers to itself, directly or round a loop, is `#CIRCULAR!`
 rather than a stack overflow.
 
-Implemented: `+ - * / ^`, comparison, `&`, `SUM AVERAGE COUNT COUNTA MIN MAX
-ABS ROUND IF`, ranges, and `$A$1` accepted and ignored. Not implemented:
-everything else, which is `#NAME?` rather than a crash.
+**`IF` chooses before it computes.** Everything else takes evaluated
+arguments; evaluating both branches of an IF defeats the thing it is most
+used for — `IF(A1=0,"ゼロ",100/A1)` guards a division by zero, and computing
+the guarded branch anyway makes the whole formula `#DIV/0!`, which is the
+error the guard exists to avoid. `AND`/`OR` are *not* lazy, and neither are
+Excel's.
+
+Implemented: `+ - * / ^`, comparison, `&`, ranges, `$A$1` accepted and
+ignored, and
+
+    SUM AVERAGE COUNT COUNTA MIN MAX ABS ROUND
+    COUNTIF SUMIF
+    LEN LEFT RIGHT MID UPPER LOWER TRIM CONCATENATE
+    IF AND OR NOT
+
+A criterion for `COUNTIF`/`SUMIF` is a value to equal or a comparison
+written as text — `">1000"`. The operator being part of the *string* is a
+spreadsheet convention rather than a general one, and `SUMIF` takes an
+optional third range to total instead of the one it tested, which is how
+Excel spells "test one column, total another".
+
+Not implemented: everything else, which is `#NAME?` rather than a crash.
 
 ## Where a column letter lives
 

@@ -39,7 +39,7 @@
 
 (def error-values
   "The strings a cell holds when its formula cannot be computed."
-  #{"#DIV/0!" "#VALUE!" "#NAME?" "#REF!" "#CIRCULAR!"})
+  #{"#DIV/0!" "#VALUE!" "#NAME?" "#REF!" "#CIRCULAR!" "#N/A"})
 
 (defn error? [x] (contains? error-values (str x)))
 
@@ -244,6 +244,46 @@
   [xs]
   (keep as-number (flatten xs)))
 
+(defn- compare-op [op a b]
+  (let [na (as-number a) nb (as-number b)
+        [x y] (if (and na nb) [na nb] [(str a) (str b)])
+        c (compare x y)]
+    (case op
+      "=" (zero? c) "<>" (not (zero? c))
+      "<" (neg? c) ">" (pos? c)
+      "<=" (not (pos? c)) ">=" (not (neg? c))
+      false)))
+
+(defn- truthy?
+  "Whether a value is true for `IF`, `AND`, `OR` and `NOT`.
+
+  A spreadsheet has booleans and this model has text, so both spellings
+  count: `TRUE` from a comparison, and a non-zero number. Empty text and
+  zero are false, which is Excel's rule and what somebody writing
+  `IF(A1,…)` means."
+  [x]
+  (cond
+    (boolean? x) x
+    (nil? x) false
+    (= "" (str x)) false
+    (as-number x) (not (zero? (as-number x)))
+    (= "FALSE" (str/upper-case (str x))) false
+    :else true))
+
+(defn- matches?
+  "Whether `v` satisfies a criterion the way `SUMIF` means it.
+
+  A criterion is a value to equal, or a comparison written as text —
+  `\">1000\"`, `\"<>Q1\"`. That second form is a spreadsheet convention and
+  not a general one: the operator is part of the *string*, so a criterion
+  reading `>1000` tests a comparison and one reading `1000` tests equality."
+  [v criterion]
+  (let [c (str criterion)]
+    (if-let [[_ op rest'] (re-matches #"(<=|>=|<>|<|>|=)(.*)" c)]
+      (compare-op op v rest')
+      (let [nv (as-number v) nc (as-number c)]
+        (if (and nv nc) (== nv nc) (= (str v) c))))))
+
 (defn- apply-fn [name args]
   (let [nums (numbers-in args)
         flat (flatten args)]
@@ -266,21 +306,58 @@
                       ;; the half-up rounding a spreadsheet does is round's.
                       (/ (double (Math/round (* (double n) f))) f))
                     "#VALUE!"))
-        "IF" (let [test (first flat)]
-               (if (or (true? test) (and (as-number test) (not (zero? (as-number test)))))
-                 (nth flat 1 "")
-                 (nth flat 2 "")))
-        "#NAME?"))))
 
-(defn- compare-op [op a b]
-  (let [na (as-number a) nb (as-number b)
-        [x y] (if (and na nb) [na nb] [(str a) (str b)])
-        c (compare x y)]
-    (case op
-      "=" (zero? c) "<>" (not (zero? c))
-      "<" (neg? c) ">" (pos? c)
-      "<=" (not (pos? c)) ">=" (not (neg? c))
-      false)))
+        ;; ── conditional aggregates ──
+        ;;
+        ;; The pair that makes a spreadsheet useful for anything real:
+        ;; totalling the rows that match something. `SUMIF` takes an optional
+        ;; third range to add up instead of the one it tested, which is how
+        ;; Excel spells "test one column, total another".
+        "COUNTIF" (let [[tested criterion] args]
+                    (count (filter #(matches? % (first (flatten [criterion])))
+                                   (flatten [tested]))))
+        "SUMIF" (let [[tested criterion sum-range] args
+                      c (first (flatten [criterion]))
+                      xs (vec (flatten [tested]))
+                      ys (vec (flatten [(if (nil? sum-range) tested sum-range)]))]
+                  (reduce + 0
+                          (keep-indexed
+                           (fn [i v]
+                             (when (matches? v c) (as-number (nth ys i nil))))
+                           xs)))
+
+        ;; ── text ──
+        "LEN" (count (str (first flat)))
+        "LEFT" (let [t (str (first flat))
+                     n (long (or (as-number (second flat)) 1))]
+                 (subs t 0 (max 0 (min n (count t)))))
+        "RIGHT" (let [t (str (first flat))
+                      n (long (or (as-number (second flat)) 1))]
+                  (subs t (max 0 (- (count t) (max 0 n)))))
+        "MID" (let [t (str (first flat))
+                    start (long (or (as-number (nth flat 1 nil)) 1))
+                    n (long (or (as-number (nth flat 2 nil)) 0))
+                    from (min (max 0 (dec start)) (count t))]
+                (subs t from (min (+ from (max 0 n)) (count t))))
+        "UPPER" (str/upper-case (str (first flat)))
+        "LOWER" (str/lower-case (str (first flat)))
+        "TRIM" (str/trim (str (first flat)))
+        "CONCATENATE" (apply str (map str flat))
+
+        ;; ── logic ──
+        ;;
+        ;; Not short-circuiting, unlike `IF`. Excel's are not either — every
+        ;; argument is evaluated and an error in any of them is the answer,
+        ;; which the check at the top of this function already does.
+        "AND" (every? truthy? flat)
+        "OR" (boolean (some truthy? flat))
+        "NOT" (not (truthy? (first flat)))
+
+        ;; `IF` never reaches here — `eval-node` handles it before its
+        ;; arguments are evaluated. Named so that one arriving anyway would
+        ;; not read as an unknown function.
+        "IF" "#NAME?"
+        "#NAME?"))))
 
 (defn- eval-node [node tab seen]
   (let [[kind a b] node]
@@ -302,7 +379,19 @@
                                        (inc (max (second from) (second to))))]
                         (value-at tab row col seen)))
                  "#REF!"))
-      :call (apply-fn a (mapv #(eval-node % tab seen) b))
+      ;; `IF` chooses before it computes. Everything else takes evaluated
+      ;; arguments, and evaluating both branches of an IF defeats the thing
+      ;; it is most used for: `IF(A1=0,"ゼロ",100/A1)` guards a division by
+      ;; zero, and computing the guarded branch anyway makes the whole
+      ;; formula #DIV/0! — the error the guard exists to avoid. Measured
+      ;; before it was fixed.
+      :call (if (= "IF" a)
+              (let [test (eval-node (first b) tab seen)]
+                (cond
+                  (error? test) test
+                  (truthy? test) (if (> (count b) 1) (eval-node (nth b 1) tab seen) "")
+                  :else (if (> (count b) 2) (eval-node (nth b 2) tab seen) "")))
+              (apply-fn a (mapv #(eval-node % tab seen) b)))
       :op (let [op a
                 x (eval-node b tab seen)
                 y (eval-node (nth node 3) tab seen)]
