@@ -20,12 +20,14 @@
 ;;   scripts/test-cljs.cljs
 
 (require '[clojure.test :as t]
+         'sheets.chart-test
          'sheets.csv-test
          'sheets.formula-test
          'sheets.model-test
          'sheets.xlsx-test)
 
-(let [{:keys [fail error]} (t/run-tests 'sheets.csv-test
+(let [{:keys [fail error]} (t/run-tests 'sheets.chart-test
+                                        'sheets.csv-test
                                         'sheets.formula-test
                                         'sheets.model-test
                                         'sheets.xlsx-test)]
