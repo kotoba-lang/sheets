@@ -93,78 +93,190 @@
           scaled (/ largest magnitude)]
       (* magnitude (cond (<= scaled 1) 1 (<= scaled 2) 2 (<= scaled 5) 5 :else 10)))))
 
-(defn- bars [values labels top width height pad]
-  (let [n (count values)
-        step (/ (- width (* 2 pad)) (max 1 n))
-        bar-width (* step 0.7)]
-    (apply str
-           (map-indexed
-            (fn [i v]
-              (let [v (or v 0)
-                    h (* (- height (* 2 pad)) (/ (max 0.0 (double v)) top))
-                    x (+ pad (* i step) (* (- step bar-width) 0.5))
-                    y (- height pad h)]
-                (str "<rect x=\"" (round2 x) "\" y=\"" (round2 y)
-                     "\" width=\"" (round2 bar-width) "\" height=\"" (round2 h)
-                     "\" fill=\"" (nth palette (mod i (count palette))) "\">"
-                     ;; `format-number`, so the tooltip says 1200 and not
-                     ;; 1200.0 — the same text the cell shows.
-                     "<title>" (esc (nth labels i (str (inc i)))) ": "
-                     (esc (formula/format-number v)) "</title>"
-                     "</rect>")))
-            values))))
+(defn- text-width
+  "About how wide `text` is at `size` pixels.
 
-(defn- polyline [values top width height pad]
+  There is no font here to ask, and the answer only has to be good enough to
+  decide whether two labels touch and how much room the widest one needs. A
+  CJK character is an em square; the rest average a little over half of one.
+
+  Counted with a regular expression rather than character by character
+  because `(int ch)` is a code point on the JVM and 0 in ClojureScript —
+  that is the bug that put control characters in every cell reference a
+  workbook written from nbb contained, and it is not one to write twice."
+  [text size]
+  (let [s (str text)
+        wide (count (re-seq #"[^ -ÿ]" s))]
+    (* size (+ wide (* 0.55 (- (count s) wide))))))
+
+(def ^:private axis-font 10)
+(def ^:private tick-font 9)
+
+(defn- plot
+  "Where the drawing goes, given the widest thing that has to sit beside it.
+
+  The axis label used to be written at a fixed 24 pixels from the left with
+  its end against the axis, which put `4000` two pixels off the left edge of
+  the picture: the chart read `000`, and every assertion about it passed,
+  because the text was in the string and only outside the frame. The left
+  margin is the label's own width now, so it cannot happen for any number."
+  [width height top-text]
+  (let [left (max 24.0 (+ 8.0 (text-width top-text axis-font)))]
+    {:width width :height height :left left :right 24.0
+     :pad-top 24.0 :bottom (+ 24.0 tick-font)}))
+
+(defn- plot-width [{:keys [width left right]}] (- width left right))
+(defn- plot-height [{:keys [height pad-top bottom]}] (- height pad-top bottom))
+
+(defn- categories
+  "The labels along the bottom, at `xs`, as many of them as fit.
+
+  Every k-th when they would touch: twelve months in 320 pixels overlap into
+  a grey band, and every other one is a chart you can read. The ones not
+  drawn are still in the tooltips — which is where all of them were. The
+  chart knew what each bar was called and drew nothing to say so, so a
+  quarterly total was four blue rectangles unless you hovered over them."
+  [labels xs {:keys [width height bottom] :as box}]
+  (let [widest (reduce max 1.0 (map #(text-width % tick-font) labels))
+        gap (if (> (count xs) 1)
+              (Math/abs (double (- (second xs) (first xs))))
+              (plot-width box))
+        every-nth (max 1 (long (Math/ceil (/ (+ widest 4.0) (max 1.0 gap)))))
+        baseline (+ (- height bottom) tick-font 4.0)]
+    (apply str
+           (keep-indexed
+            (fn [i x]
+              (when (zero? (mod i every-nth))
+                (let [label (nth labels i (str (inc i)))
+                      half (/ (text-width label tick-font) 2.0)
+                      ;; Clamped, so an edge label leans in rather than off:
+                      ;; the first point of a line chart sits on the axis,
+                      ;; and its label is wider than the margin beside it.
+                      cx (min (- width 2.0 half) (max (+ 2.0 half) (double x)))]
+                  (str "<text x=\"" (round2 cx) "\" y=\"" (round2 baseline)
+                       "\" text-anchor=\"middle\" font-size=\"" tick-font
+                       "\" fill=\"#57606a\">" (esc label) "</text>"))))
+            xs))))
+
+(defn- bars [values labels top {:keys [left height bottom] :as box}]
   (let [n (count values)
-        step (if (> n 1) (/ (- width (* 2 pad)) (dec n)) 0)]
+        step (/ (plot-width box) (max 1 n))
+        bar-width (* step 0.7)
+        centres (mapv #(+ left (* % step) (/ step 2.0)) (range n))]
+    (str
+     (apply str
+            (map-indexed
+             (fn [i v]
+               (let [v (or v 0)
+                     h (* (plot-height box) (/ (max 0.0 (double v)) top))
+                     x (- (nth centres i) (/ bar-width 2.0))
+                     y (- height bottom h)]
+                 (str "<rect x=\"" (round2 x) "\" y=\"" (round2 y)
+                      "\" width=\"" (round2 bar-width) "\" height=\"" (round2 h)
+                      "\" fill=\"" (nth palette (mod i (count palette))) "\">"
+                      ;; `format-number`, so the tooltip says 1200 and not
+                      ;; 1200.0 — the same text the cell shows.
+                      "<title>" (esc (nth labels i (str (inc i)))) ": "
+                      (esc (formula/format-number v)) "</title>"
+                      "</rect>")))
+             values))
+     (categories labels centres box))))
+
+(defn- polyline [values labels top {:keys [left height bottom] :as box}]
+  (let [n (count values)
+        step (if (> n 1) (/ (plot-width box) (dec n)) 0)
+        xs (mapv #(+ left (* % step)) (range n))
+        point (fn [i v]
+                [(nth xs i)
+                 (- height bottom (* (plot-height box)
+                                     (/ (max 0.0 (double (or v 0))) top)))])]
     (str "<polyline fill=\"none\" stroke=\"" (first palette) "\" stroke-width=\"2\" points=\""
-         (str/join " "
-                   (map-indexed
-                    (fn [i v]
-                      (let [v (or v 0)
-                            x (+ pad (* i step))
-                            y (- height pad (* (- height (* 2 pad))
-                                               (/ (max 0.0 (double v)) top)))]
-                        (str (round2 x) "," (round2 y))))
-                    values))
-         "\"/>")))
+         (str/join " " (map-indexed (fn [i v] (let [[x y] (point i v)]
+                                                (str (round2 x) "," (round2 y))))
+                                    values))
+         "\"/>"
+         ;; A dot per reading, and the reading in its tooltip. The line says
+         ;; which way things went and nothing said what any of them was.
+         (apply str
+                (map-indexed
+                 (fn [i v]
+                   (let [[x y] (point i v)]
+                     (str "<circle cx=\"" (round2 x) "\" cy=\"" (round2 y)
+                          "\" r=\"2.5\" fill=\"" (first palette) "\">"
+                          "<title>" (esc (nth labels i (str (inc i)))) ": "
+                          (esc (formula/format-number (or v 0))) "</title></circle>")))
+                 values))
+         (categories labels xs box))))
+
+(defn- legend
+  "The key beside a pie, because a slice has no room to be labelled.
+
+  As many entries as the height allows and then a count of the rest, rather
+  than as many as fit and silence about the others: a key that shows four of
+  nine categories and does not say so is read as a chart of four."
+  [labels width height]
+  (let [x (* width 0.62)
+        line 14.0
+        room (max 1 (long (Math/floor (/ (- height 8.0) line))))
+        n (count labels)
+        shown (if (> n room) (dec room) n)
+        top (max 10.0 (- (/ height 2.0) (* (/ (double (min n room)) 2.0) line)))
+        entry (fn [i text swatch]
+                (str (when swatch
+                       (str "<rect x=\"" (round2 x)
+                            "\" y=\"" (round2 (- (+ top (* i line)) 7.0))
+                            "\" width=\"8\" height=\"8\" fill=\"" swatch "\"/>"))
+                     "<text x=\"" (round2 (+ x (if swatch 12.0 0.0)))
+                     "\" y=\"" (round2 (+ top (* i line)))
+                     "\" font-size=\"" tick-font "\" fill=\"#57606a\">" (esc text) "</text>"))]
+    (apply str
+           (concat
+            (map-indexed (fn [i label]
+                           (entry i label (nth palette (mod i (count palette)))))
+                         (take shown labels))
+            (when (> n shown)
+              [(entry shown (str "ほか " (- n shown) " 件") nil)])))))
 
 (defn- pie [values labels width height]
   (let [total (reduce + 0.0 (map #(max 0.0 (double (or % 0))) values))
-        cx (/ width 2.0) cy (/ height 2.0)
-        r (* 0.4 (min width height))]
+        ;; Left of centre, because the key sits on the right. Centred with a
+        ;; key beside it, the pie is centred on nothing and the picture leans.
+        cx (* width 0.3) cy (/ height 2.0)
+        r (* 0.4 (min (* width 0.6) height))]
     (if (zero? total)
       ""
-      (str/join
-       (first
-        (reduce
-         (fn [[out from] [i v]]
-           (let [fraction (/ (max 0.0 (double (or v 0))) total)
-                 to (+ from fraction)
-                 ;; Two decimals of a turn is a third of a degree, which is
-                 ;; below what a 320-pixel pie can show.
-                 angle (fn [t] (* 2 Math/PI (- t 0.25)))
-                 x (fn [t] (round2 (+ cx (* r (Math/cos (angle t))))))
-                 y (fn [t] (round2 (+ cy (* r (Math/sin (angle t))))))
-                 large (if (> fraction 0.5) 1 0)]
-             [(conj out
-                    (if (>= fraction 1)
-                      ;; A single slice is a circle: an arc from a point
-                      ;; back to itself draws nothing.
-                      (str "<circle cx=\"" (round2 cx) "\" cy=\"" (round2 cy)
-                           "\" r=\"" (round2 r) "\" fill=\"" (first palette) "\">"
-                           "<title>" (esc (nth labels i (str (inc i)))) "</title></circle>")
-                      (str "<path d=\"M" (round2 cx) "," (round2 cy)
-                           " L" (x from) "," (y from)
-                           " A" (round2 r) "," (round2 r) " 0 " large ",1 "
-                           (x to) "," (y to) " Z\" fill=\""
-                           (nth palette (mod i (count palette))) "\">"
-                           "<title>" (esc (nth labels i (str (inc i)))) ": "
-                           (esc (formula/format-number (or v 0)))
-                           "</title></path>")))
-              to]))
-         [[] 0.0]
-         (map-indexed vector values)))))))
+      (str
+       (str/join
+        (first
+         (reduce
+          (fn [[out from] [i v]]
+            (let [fraction (/ (max 0.0 (double (or v 0))) total)
+                  to (+ from fraction)
+                  ;; Two decimals of a turn is a third of a degree, which is
+                  ;; below what a 320-pixel pie can show.
+                  angle (fn [t] (* 2 Math/PI (- t 0.25)))
+                  x (fn [t] (round2 (+ cx (* r (Math/cos (angle t))))))
+                  y (fn [t] (round2 (+ cy (* r (Math/sin (angle t))))))
+                  large (if (> fraction 0.5) 1 0)]
+              [(conj out
+                     (if (>= fraction 1)
+                       ;; A single slice is a circle: an arc from a point
+                       ;; back to itself draws nothing.
+                       (str "<circle cx=\"" (round2 cx) "\" cy=\"" (round2 cy)
+                            "\" r=\"" (round2 r) "\" fill=\"" (first palette) "\">"
+                            "<title>" (esc (nth labels i (str (inc i)))) "</title></circle>")
+                       (str "<path d=\"M" (round2 cx) "," (round2 cy)
+                            " L" (x from) "," (y from)
+                            " A" (round2 r) "," (round2 r) " 0 " large ",1 "
+                            (x to) "," (y to) " Z\" fill=\""
+                            (nth palette (mod i (count palette))) "\">"
+                            "<title>" (esc (nth labels i (str (inc i)))) ": "
+                            (esc (formula/format-number (or v 0)))
+                            "</title></path>")))
+               to]))
+          [[] 0.0]
+          (map-indexed vector values))))
+       (legend labels width height)))))
 
 (defn svg
   "One chart as an SVG string, or nil when there is nothing to draw.
@@ -179,24 +291,34 @@
      (when (seq numbers)
        (let [kind (or (:sheets/chart-type chart) :bar)
              kind (if (contains? chart-kinds kind) kind :bar)
-             pad 24
-             top (nice-max (apply max numbers))]
+             top (nice-max (apply max numbers))
+             top-text (formula/format-number top)
+             {:keys [left right pad-top bottom] :as box} (plot width height top-text)
+             axis-y (- height bottom)]
          (str "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 "
               width " " height "\" role=\"img\" aria-label=\""
               (esc (or (:sheets/title chart) (:sheets/id chart) "グラフ")) "\">"
               (when-not (= :pie kind)
                 ;; Two lines, not a grid: the baseline and the axis. A grid
                 ;; behind three bars is more chart than data.
-                (str "<line x1=\"" pad "\" y1=\"" (- height pad) "\" x2=\"" (- width pad)
-                     "\" y2=\"" (- height pad) "\" stroke=\"#8c959f\"/>"
-                     "<line x1=\"" pad "\" y1=\"" pad "\" x2=\"" pad
-                     "\" y2=\"" (- height pad) "\" stroke=\"#8c959f\"/>"
-                     "<text x=\"" (- pad 4) "\" y=\"" (+ pad 4)
-                     "\" text-anchor=\"end\" font-size=\"10\" fill=\"#57606a\">"
-                     (esc (formula/format-number top)) "</text>"))
+                (str "<line x1=\"" (round2 left) "\" y1=\"" (round2 axis-y)
+                     "\" x2=\"" (round2 (- width right))
+                     "\" y2=\"" (round2 axis-y) "\" stroke=\"#8c959f\"/>"
+                     "<line x1=\"" (round2 left) "\" y1=\"" pad-top
+                     "\" x2=\"" (round2 left)
+                     "\" y2=\"" (round2 axis-y) "\" stroke=\"#8c959f\"/>"
+                     ;; The top of the axis and the foot of it. One number
+                     ;; tells you the scale; two tell you it starts at zero,
+                     ;; which is the thing a bar chart is read as promising.
+                     "<text x=\"" (round2 (- left 4.0)) "\" y=\"" (+ pad-top 4.0)
+                     "\" text-anchor=\"end\" font-size=\"" axis-font
+                     "\" fill=\"#57606a\">" (esc top-text) "</text>"
+                     "<text x=\"" (round2 (- left 4.0)) "\" y=\"" (round2 (+ axis-y 3.0))
+                     "\" text-anchor=\"end\" font-size=\"" axis-font
+                     "\" fill=\"#57606a\">0</text>"))
               (case kind
-                :bar (bars values labels top width height pad)
-                :line (polyline values top width height pad)
+                :bar (bars values labels top box)
+                :line (polyline values labels top box)
                 :pie (pie values labels width height))
               "</svg>"))))))
 
