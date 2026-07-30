@@ -44,3 +44,13 @@
   ;; Not everything that arrives is one, and a key that is not an address is
   ;; carried rather than dropped.
   (is (= "plan!A1" (wire/cell-address "plan!A1"))))
+
+(deftest a-malformed-payload-is-handed-on-rather-than-thrown-at
+  (doseq [payload [{"sheets/tabs" "nope"}
+                   {"sheets/tabs" {"plan" "not-a-tab"}}
+                   {"sheets/tabs" {"plan" {"sheets/cells" "nope"}}}
+                   {"sheets/named-ranges" "nope"}
+                   {"sheets/charts" "nope"}
+                   {"sheets/type" 7}
+                   "not-a-workbook-at-all"]]
+    (is (some? (wire/rehydrate-workbook payload)) (str "survived: " (pr-str payload)))))
