@@ -7,7 +7,14 @@
         ;; pinning the newer transit were resolving to it anyway, so what the
         ;; old pin bought was a green test rather than a behaviour.
         {:git/url "https://github.com/kotoba-lang/transit.git"
-         :git/sha "ab5d9d956e088d77d7f91357f36a4a0c6bdfcadc"}}
+         :git/sha "ab5d9d956e088d77d7f91357f36a4a0c6bdfcadc"}
+        ;; The OPC vocabulary a .xlsx is made of — content types, rels,
+        ;; package. It already knew what an xlsx was: `package-kind` returns
+        ;; :xlsx for an `xl/` prefix and `part-sort-key` orders
+        ;; `xl/worksheets/sheetN.xml`. Zero runtime deps of its own.
+        io.github.kotoba-lang/ooxml
+        {:git/url "https://github.com/kotoba-lang/ooxml.git"
+         :git/sha "d4132a077c1c3797d6300a6a8a6f9c6952e27021"}}
  :aliases
  {;; Bounded Kotoba profile (sheets.bounded-cells). :replace-paths/:replace-deps
   ;; so the compiler's classpath scan doesn't inherit the base :deps.
