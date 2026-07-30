@@ -267,3 +267,25 @@
                            (update-in wb [:sheets/tabs "売上表"]
                                       m/put-formula 9 1 "SUM(売上)"))
                           ["売上表" [9 1]])))))
+
+(deftest a-name-finds-its-tab-by-title-not-by-key
+  ;; A `definedName` in a .xlsx references a sheet by its name, and that is
+  ;; what somebody defining a range writes. Matching the map key instead
+  ;; resolved a name only in a workbook whose tabs happen to be keyed by
+  ;; their titles — which is not the workbook this Drive creates, where the
+  ;; key is an id and the title is what a person sees. Found by a test at
+  ;; the application layer, not here.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (-> (m/tab "sheet1" {:sheets/title "売上表"})
+                              (m/put-cell 1 1 "1200") (m/put-cell 2 1 "1300")
+                              (m/put-formula 3 1 "SUM(売上)")))
+               (m/add-named-range "売上" {:sheets/tab "売上表"
+                                          :sheets/range "A1:A2"}))]
+    (is (= "2500" (get-in (f/workbook-values wb) ["sheet1" [3 1]]))))
+  ;; A tab with no title falls back to its id, the same as xlsx does.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (-> (m/tab "t" {})
+                              (m/put-cell 1 1 "7")
+                              (m/put-formula 2 1 "SUM(合計)")))
+               (m/add-named-range "合計" {:sheets/tab "t" :sheets/range "A1:A1"}))]
+    (is (= "7" (get-in (f/workbook-values wb) ["t" [2 1]])))))

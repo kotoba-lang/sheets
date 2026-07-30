@@ -148,7 +148,10 @@ Not implemented: everything else, which is `#NAME?` rather than a crash.
 
 **Named ranges resolve.** `=SUM(売上)` where 売上 is `A1:A3` on this tab.
 Use `workbook-values`, not `values`: a name belongs to the workbook and a
-tab does not know which workbook it is in. A name whose range is on another
+tab does not know which workbook it is in. The tab is matched by its
+**title** — the same rule `sheets.xlsx` uses to write a `definedName`,
+because that is what a `definedName` references and what somebody defining a
+range writes. A name whose range is on another
 tab is *not* resolved — answering it against the wrong sheet would be a
 number computed from the wrong cells, which is worse than `#NAME?`.
 
