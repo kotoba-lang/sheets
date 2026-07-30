@@ -57,7 +57,9 @@
   ClojureScript and passed every JVM test."
   (:require [clojure.string :as str]
             [ooxml.core :as ooxml]
+            [sheets.chart :as chart]
             [sheets.csv :as csv]
+            [sheets.formula :as formula]
             [sheets.model :as model]
             [xml.parse :as xml])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
@@ -208,11 +210,12 @@
   Rows and cells are emitted in order and only where there is something to
   say: a sparse tab stays sparse, because a row of empty `<c>` elements is
   bytes that mean the same as their absence."
-  ([tab] (sheet-xml tab {}))
-  ([tab style-index]
+  ([tab] (sheet-xml tab {} 0))
+  ([tab style-index] (sheet-xml tab style-index 0))
+  ([tab style-index n-charts]
    (let [[rows cols] (csv/tab-bounds tab)]
     (str "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-         "<worksheet xmlns=\"" main-ns "\"><sheetData>"
+         "<worksheet xmlns=\"" main-ns "\" xmlns:r=\"" rels-ns "\"><sheetData>"
          (apply str
                 (for [row (range 1 (inc rows))
                       :let [cells (str/join (keep #(cell-xml row % (model/get-cell tab row %)
@@ -220,7 +223,11 @@
                                                   (range 1 (inc cols))))]
                       :when (seq cells)]
                   (str "<row r=\"" row "\">" cells "</row>")))
-         "</sheetData></worksheet>"))))
+         "</sheetData>"
+         ;; After `</sheetData>`: the schema fixes the order, and a
+         ;; `<drawing>` before it is a file Excel refuses.
+         (when (pos? n-charts) "<drawing r:id=\"rId1\"/>")
+         "</worksheet>"))))
 
 (defn- ordered-tabs
   "The workbook's tabs in a stable order.
@@ -292,6 +299,122 @@
        (defined-names-xml workbook tabs)
        "</workbook>"))
 
+;; ── charts ──────────────────────────────────────────────────────────────────
+;;
+;; A chart in a .xlsx is four parts and a chain of relationships: the sheet
+;; points at a drawing, the drawing at a chart, and the chart back at the
+;; cells. Any one of them missing gives a file that opens with no chart and
+;; no complaint, which is why every link is written here rather than
+;; assembled by whoever calls this.
+
+(defn- chart-ref
+  "`'売上'!$A$1:$A$3` — how a chart names the cells it is over.
+
+  Absolute and sheet-qualified, because a chart is not relative to anything
+  and a bare `A1:A3` in a chart part means nothing."
+  [sheet-name [[r1 c1] [r2 c2]]]
+  (str "'" (ooxml/xml-esc (str sheet-name)) "'!$" (model/column-name c1) "$" r1
+       ":$" (model/column-name c2) "$" r2))
+
+(defn- num-cache [values]
+  (str "<c:numCache><c:formatCode>General</c:formatCode>"
+       "<c:ptCount val=\"" (count values) "\"/>"
+       (apply str (map-indexed (fn [i v]
+                                 (str "<c:pt idx=\"" i "\"><c:v>"
+                                      ;; `format-number`, which is portable.
+                                      ;; `(str (double v))` gives 2000.0 on
+                                      ;; the JVM and 2000 in ClojureScript —
+                                      ;; the same workbook writing different
+                                      ;; bytes depending on where it ran,
+                                      ;; which a test on one host cannot see.
+                                      (if v (formula/format-number v) "")
+                                      "</c:v></c:pt>"))
+                               values))
+       "</c:numCache>"))
+
+(defn- str-cache [labels]
+  (str "<c:strCache><c:ptCount val=\"" (count labels) "\"/>"
+       (apply str (map-indexed (fn [i v]
+                                 (str "<c:pt idx=\"" i "\"><c:v>"
+                                      (ooxml/xml-esc (str v)) "</c:v></c:pt>"))
+                               labels))
+       "</c:strCache>"))
+
+(defn- chart-xml
+  "One `xl/charts/chartN.xml`.
+
+  The series names its cells *and* carries a cache of what they hold. Both:
+  the reference is what Excel recalculates from, and the cache is what every
+  other reader draws — a chart with only the reference is blank in anything
+  that does not evaluate formulas."
+  [chart-def {:keys [labels values]} label-range value-range]
+  (let [kind (or (:sheets/chart-type chart-def) :bar)
+        kind (if (contains? chart/chart-kinds kind) kind :bar)
+        plot (case kind :line "lineChart" :pie "pieChart" "barChart")]
+    (str "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+         "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\""
+         " xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\""
+         " xmlns:r=\"" rels-ns "\"><c:chart>"
+         (when-let [t (:sheets/title chart-def)]
+           (str "<c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>"
+                (ooxml/xml-esc (str t)) "</a:t></a:r></a:p></c:rich></c:tx>"
+                "<c:overlay val=\"0\"/></c:title><c:autoTitleDeleted val=\"0\"/>"))
+         "<c:plotArea><c:layout/><c:" plot ">"
+         (when (= :bar kind) "<c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>")
+         "<c:varyColors val=\"" (if (= :pie kind) "1" "0") "\"/>"
+         "<c:ser><c:idx val=\"0\"/><c:order val=\"0\"/>"
+         (when label-range
+           (str "<c:cat><c:strRef><c:f>" (ooxml/xml-esc label-range) "</c:f>"
+                (str-cache labels) "</c:strRef></c:cat>"))
+         "<c:val><c:numRef><c:f>" (ooxml/xml-esc value-range) "</c:f>"
+         (num-cache values) "</c:numRef></c:val>"
+         "</c:ser>"
+         (when-not (= :pie kind)
+           "<c:axId val=\"111111111\"/><c:axId val=\"222222222\"/>")
+         "</c:" plot ">"
+         (when-not (= :pie kind)
+           ;; Two axes, and a chart that names axIds without defining them
+           ;; is one Excel refuses to open.
+           (str "<c:catAx><c:axId val=\"111111111\"/><c:scaling>"
+                "<c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/>"
+                "<c:axPos val=\"b\"/><c:crossAx val=\"222222222\"/></c:catAx>"
+                "<c:valAx><c:axId val=\"222222222\"/><c:scaling>"
+                "<c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/>"
+                "<c:axPos val=\"l\"/><c:crossAx val=\"111111111\"/></c:valAx>"))
+         "</c:plotArea><c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>")))
+
+(defn- drawing-xml
+  "`xl/drawings/drawingN.xml` — where the charts sit on the sheet.
+
+  Anchored by cell rather than by absolute position, so a chart stays beside
+  its data when the rows above it change height. Stacked down the sheet at a
+  fixed offset from the used range, because this model has nowhere to record
+  where somebody dragged one."
+  [n-charts first-col]
+  (str "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+       "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/"
+       "spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/"
+       "drawingml/2006/main\" xmlns:r=\"" rels-ns "\">"
+       (apply str
+              (for [i (range n-charts)]
+                (let [top (+ 1 (* i 16))]
+                  (str "<xdr:twoCellAnchor><xdr:from><xdr:col>" first-col
+                       "</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>" top
+                       "</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
+                       "<xdr:to><xdr:col>" (+ first-col 8)
+                       "</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>" (+ top 15)
+                       "</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
+                       "<xdr:graphicFrame><xdr:nvGraphicFramePr>"
+                       "<xdr:cNvPr id=\"" (+ 2 i) "\" name=\"Chart " (inc i) "\"/>"
+                       "<xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>"
+                       "<xdr:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></xdr:xfrm>"
+                       "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/"
+                       "drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas."
+                       "openxmlformats.org/drawingml/2006/chart\" r:id=\"rId"
+                       (inc i) "\"/></a:graphicData></a:graphic></xdr:graphicFrame>"
+                       "<xdr:clientData/></xdr:twoCellAnchor>"))))
+       "</xdr:wsDr>"))
+
 (defn xlsx-files
   "Every part of the .xlsx, as path → text.
 
@@ -301,6 +424,12 @@
   (let [tabs (ordered-tabs workbook)
         tabs (if (seq tabs) tabs [(model/tab "Sheet1")])
         sheet-path (fn [n] (str "xl/worksheets/sheet" n ".xml"))
+        ;; Which charts belong to which sheet, by the same title-or-id rule
+        ;; everything else in this library uses.
+        charts-for (fn [tab] (let [name' (or (:sheets/title tab) (:sheets/id tab))]
+                               (filterv #(contains? #{nil name' (:sheets/id tab)}
+                                                    (:sheets/tab %))
+                                        (:sheets/charts workbook))))
         styles (distinct-styles tabs)
         ;; Position 0 in `cellXfs` is the default, so the first style is 1.
         style-index (into {} (map-indexed (fn [i st] [st (inc i)]) styles))]
@@ -317,6 +446,23 @@
                  "/xl/styles.xml"
                  (str "application/vnd.openxmlformats-officedocument."
                       "spreadsheetml.styles+xml"))]
+               ;; A part with no content type is a part Excel does not read,
+               ;; and a chart missing one opens as an empty frame.
+               (mapcat (fn [[index tab]]
+                         (let [charts (charts-for tab) n (inc index)]
+                           (when (seq charts)
+                             (cons
+                              (ooxml/override-content-type
+                               (str "/xl/drawings/drawing" n ".xml")
+                               "application/vnd.openxmlformats-officedocument.drawing+xml")
+                              (map-indexed
+                               (fn [i _]
+                                 (ooxml/override-content-type
+                                  (str "/xl/charts/chart" n "-" (inc i) ".xml")
+                                  (str "application/vnd.openxmlformats-officedocument."
+                                       "drawingml.chart+xml")))
+                               charts)))))
+                       (map-indexed vector tabs))
                (map-indexed (fn [index _]
                               (ooxml/override-content-type
                                (str "/" (sheet-path (inc index)))
@@ -351,9 +497,53 @@
         [(ooxml/relationship {:id (str "rId" (inc (count tabs)))
                               :type (str rels-ns "/styles")
                               :target "styles.xml"})]))}
-     (map-indexed (fn [index tab] [(sheet-path (inc index))
-                                   (sheet-xml tab style-index)])
-                  tabs))))
+     (concat
+      (map-indexed (fn [index tab] [(sheet-path (inc index))
+                                    (sheet-xml tab style-index
+                                               (count (charts-for tab)))])
+                   tabs)
+      ;; The chain: sheet → drawing → chart → cells. A link missing anywhere
+      ;; gives a file that opens with no chart and no complaint, which is
+      ;; why they are written together rather than by whoever calls this.
+      (mapcat
+       (fn [[index tab]]
+         (let [charts (charts-for tab)
+               n (inc index)
+               sheet-name (or (:sheets/title tab) (:sheets/id tab))
+               [_ cols] (csv/tab-bounds tab)]
+           (when (seq charts)
+             (concat
+              [[(str "xl/worksheets/_rels/sheet" n ".xml.rels")
+                (ooxml/relationships-xml
+                 [(ooxml/relationship {:id "rId1" :type (str rels-ns "/drawing")
+                                       :target (str "../drawings/drawing" n ".xml")})])]
+               [(str "xl/drawings/drawing" n ".xml")
+                (drawing-xml (count charts) (inc cols))]
+               [(str "xl/drawings/_rels/drawing" n ".xml.rels")
+                (ooxml/relationships-xml
+                 (map-indexed (fn [i _]
+                                (ooxml/relationship
+                                 {:id (str "rId" (inc i))
+                                  :type (str rels-ns "/chart")
+                                  :target (str "../charts/chart" n "-" (inc i) ".xml")}))
+                              charts))]]
+              (map-indexed
+               (fn [i chart-def]
+                 (let [bounds (chart/parse-range (:sheets/data-range chart-def))
+                       data (chart/series tab chart-def)
+                       [[r1 c1] [r2 c2]] bounds
+                       labels? (and bounds (> c2 c1)
+                                    (not= (count (keep identity (:values data))) 0)
+                                    (= (count (:labels data)) (inc (- r2 r1)))
+                                    (not-any? #(re-matches #"\d+" (str %))
+                                              (:labels data)))
+                       value-col (if labels? (inc c1) c1)]
+                   [(str "xl/charts/chart" n "-" (inc i) ".xml")
+                    (chart-xml chart-def data
+                               (when labels? (chart-ref sheet-name [[r1 c1] [r2 c1]]))
+                               (chart-ref sheet-name [[r1 value-col] [r2 value-col]]))]))
+               charts)))))
+       (map-indexed vector tabs))))))
 
 (defn package
   "The parts as an `ooxml/package`, for a caller that wants to look before
@@ -439,10 +629,16 @@
                   (str (count orphans)
                        " 件の名前付き範囲は、存在しないタブを指しているため"
                        "書き出されません。"))]))
-      (when (seq (:sheets/charts workbook))
-        [(entry :xlsx/charts-dropped (:sheets/id workbook)
-                (str (count (:sheets/charts workbook))
-                     " 件のグラフは書き出されません。"))])))))
+      ;; Charts are written now. What is left is one that names a tab this
+      ;; workbook does not have — there is no sheet for its drawing to sit
+      ;; on, and one anchored to nothing opens as an empty frame.
+      (let [names (into #{} (mapcat (fn [tab] [(:sheets/id tab) (:sheets/title tab)])) tabs)
+            orphans (remove #(contains? (conj names nil) (:sheets/tab %))
+                            (:sheets/charts workbook))]
+        (when (seq orphans)
+          [(entry :xlsx/charts-dropped (:sheets/id workbook)
+                  (str (count orphans)
+                       " 件のグラフは、存在しないタブを指しているため書き出されません。"))]))))))
 
 ;; ── dates, which are numbers wearing a format ───────────────────────────────
 ;;

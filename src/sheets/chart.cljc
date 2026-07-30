@@ -34,7 +34,7 @@
   almost always a comparison of magnitudes."
   #{:bar :line :pie})
 
-(defn- parse-range
+(defn parse-range
   "`A1:B9` → `[[r1 c1] [r2 c2]]`, or nil.
 
   Normalised so that the first corner is the top-left whichever way round it
