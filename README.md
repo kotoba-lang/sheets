@@ -12,9 +12,26 @@ The Pages UI is local to kotoba-lang and does not redirect to external hosts.
 
 The workbook model keeps spreadsheet semantics needed for Google Sheets and
 Excel-style roundtrips: tabs, cell values, formulas, cell style metadata, named
-ranges, and chart descriptors. The shared wire format is Kotoba Transit JSON via
-`sheets.wire/workbook-envelope`, using `application/transit+json` and the
+ranges, and chart descriptors. The shared wire format is the Kotoba office
+envelope via `sheets.wire/workbook-envelope`, using `application/json` and the
 `:sheets/workbook` resource kind.
+
+## Coming back
+
+The envelope is a lossy projection: `:sheets/type` leaves as `"workbook"` and
+a cell address `[1 1]` leaves as the string `"[1 1]"`, while tab ids and
+named-range ids are strings that must stay strings. Telling those apart needs
+the schema, so the reader is here rather than in `transit`:
+
+```clojure
+(wire/workbook-of-envelope (:body envelope))   ; read + rehydrate
+(wire/rehydrate-workbook projected)            ; if you already read it
+(wire/cell-address-string [1 1])               ; "[1 1]", for reaching into a projection
+```
+
+Rehydrate before validating. `sheets.validate` reads namespaced keys, and on
+a projected payload it finds none — reporting no problems rather than
+reporting that it cannot see any.
 
 ## Test
 

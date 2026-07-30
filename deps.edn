@@ -1,7 +1,13 @@
 {:paths ["src" "resources"]
  :deps {io.github.kotoba-lang/transit
+        ;; Advanced off 77e3ce7d, which was the last commit before the office
+        ;; wire moved from Transit-tagged JSON to plain JSON. Staying there
+        ;; made the round-trip test below pass without the projection ever
+        ;; being exercised — and consumers that also depend on a library
+        ;; pinning the newer transit were resolving to it anyway, so what the
+        ;; old pin bought was a green test rather than a behaviour.
         {:git/url "https://github.com/kotoba-lang/transit.git"
-         :git/sha "77e3ce7d1b5271440f56aa77cea0fd6e77b88eac"}}
+         :git/sha "ab5d9d956e088d77d7f91357f36a4a0c6bdfcadc"}}
  :aliases
  {;; Bounded Kotoba profile (sheets.bounded-cells). :replace-paths/:replace-deps
   ;; so the compiler's classpath scan doesn't inherit the base :deps.
