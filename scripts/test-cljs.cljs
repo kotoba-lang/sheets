@@ -21,10 +21,12 @@
 
 (require '[clojure.test :as t]
          'sheets.csv-test
+         'sheets.formula-test
          'sheets.model-test
          'sheets.xlsx-test)
 
 (let [{:keys [fail error]} (t/run-tests 'sheets.csv-test
+                                        'sheets.formula-test
                                         'sheets.model-test
                                         'sheets.xlsx-test)]
   (when (pos? (+ (or fail 0) (or error 0)))
