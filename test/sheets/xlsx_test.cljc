@@ -44,8 +44,12 @@
 
 (deftest a-package-has-every-part-a-reader-will-look-for
   (let [files (xlsx/xlsx-files (plan))]
+    ;; `xl/styles.xml` is written even by a workbook with no styles: a cell
+    ;; with no `s` means cellXfs position 0, and a package whose styles part
+    ;; is missing is one Excel opens with a repair prompt.
     (is (= #{"[Content_Types].xml" "_rels/.rels" "xl/workbook.xml"
-             "xl/_rels/workbook.xml.rels" "xl/worksheets/sheet1.xml"}
+             "xl/_rels/workbook.xml.rels" "xl/worksheets/sheet1.xml"
+             "xl/styles.xml"}
            (set (keys files))))
     ;; The relationship the workbook is reached by, and the one the sheet is.
     (is (str/includes? (get files "_rels/.rels") "xl/workbook.xml"))
@@ -300,13 +304,15 @@
 (deftest a-styled-number-comes-in-as-the-date-it-is
   (let [tab (m/tab-by-id (xlsx/workbook-from-files styled-package) "Log")]
     (is (= {:sheets/value "2023-03-15"} (m/get-cell tab 1 2)) "builtin numFmtId 14")
-    (is (= {:sheets/value "2023-03-15"} (m/get-cell tab 1 3)) "custom code with a date token")
+    ;; The style comes back as well now, so this asks about the value.
+    (is (= "2023-03-15" (:sheets/value (m/get-cell tab 1 3)))
+        "custom code with a date token")
     (is (= {:sheets/value "2023-03-15T12:00:00"} (m/get-cell tab 1 5)) "date and time")))
 
 (deftest a-number-under-any-other-format-stays-a-number
   (let [tab (m/tab-by-id (xlsx/workbook-from-files styled-package) "Log")]
     ;; The currency code's only letters are inside a quoted literal.
-    (is (= {:sheets/value "45000"} (m/get-cell tab 1 4)) "0.00\"円\"")
+    (is (= "45000" (:sheets/value (m/get-cell tab 1 4))) "0.00\"円\"")
     (is (= {:sheets/value "45000"} (m/get-cell tab 1 6)) "General")))
 
 (deftest a-date-format-does-not-make-text-a-date
@@ -362,19 +368,20 @@
   (is (= [] (xlsx/unexpressed (plan))))
   (is (= [] (xlsx/unexpressed (m/workbook "empty")))))
 
-(deftest cell-styles-are-named-once-per-tab
+(deftest unwritable-style-parts-are-named-once-per-tab
   ;; Once per tab, not once per cell: the answer is the same for every one,
   ;; and a styled header row would otherwise report a column's worth of
-  ;; identical warnings.
+  ;; identical warnings. Bold is written now, so the entry is about what is
+  ;; left rather than about the style.
   (let [wb (m/add-tab (m/workbook "wb")
                       (-> (m/tab "売上" {:sheets/title "売上"})
                           (m/put-cell 1 1 "四半期")
                           (m/put-cell 1 2 "金額")
-                          (m/put-cell-style 1 1 {:bold true})
-                          (m/put-cell-style 1 2 {:bold true})))
+                          (m/put-cell-style 1 1 {:bold true :color "red"})
+                          (m/put-cell-style 1 2 {:bold true :color "blue"})))
         entries (xlsx/unexpressed wb)]
     (is (= 1 (count entries)))
-    (is (= :xlsx/cell-styles-dropped (:sheets/code (first entries))))
+    (is (= :xlsx/cell-style-parts-dropped (:sheets/code (first entries))))
     (is (= "売上" (:sheets/id (first entries))))
     (is (= :info (:sheets/severity (first entries)))
         "a format not carrying something is a property of the format")))
@@ -436,3 +443,107 @@
     (let [entries (xlsx/unexpressed wb)]
       (is (= [:xlsx/named-ranges-dropped] (mapv :sheets/code entries)))
       (is (str/includes? (:sheets/msg (first entries)) "1 件")))))
+
+;; ── cell styles ─────────────────────────────────────────────────────────────
+
+(defn- styled []
+  (m/add-tab (m/workbook "wb")
+             (-> (m/tab "売上" {:sheets/title "売上"})
+                 (m/put-cell 1 1 "四半期") (m/put-cell-style 1 1 {:bold true})
+                 (m/put-cell 1 2 "金額")
+                 (m/put-cell-style 1 2 {:bold true :italic true :align :center})
+                 (m/put-cell 2 2 "1200")
+                 (m/put-cell-style 2 2 {:number-format "#,##0\"円\""}))))
+
+(deftest a-style-survives-the-round-trip
+  ;; The largest of the losses `unexpressed` used to report. A file whose
+  ;; header row was bold came back plain, and going out again lost it for
+  ;; good.
+  (let [tab (m/tab-by-id (xlsx/workbook-from-files (xlsx/xlsx-files (styled))) "売上")]
+    (is (= {:bold true} (:sheets/style (m/get-cell tab 1 1))))
+    (is (= {:bold true :italic true :align :center} (:sheets/style (m/get-cell tab 1 2))))
+    (is (= {:number-format "#,##0\"円\""} (:sheets/style (m/get-cell tab 2 2))))
+    ;; And the values are still the values.
+    (is (= "四半期" (:sheets/value (m/get-cell tab 1 1))))
+    (is (= "1200" (:sheets/value (m/get-cell tab 2 2))))))
+
+(deftest a-cell-points-at-a-style-rather-than-carrying-one
+  ;; Two levels of indirection — cell → xf → font/numFmt — and this is what
+  ;; made styles the largest loss: a writer that emits a <font b="1"/> and
+  ;; nothing else produces a file Excel opens with no bold in it, because
+  ;; nothing pointed at the font.
+  (let [files (xlsx/xlsx-files (styled))
+        sheet (get files "xl/worksheets/sheet1.xml")
+        styles (get files "xl/styles.xml")]
+    (is (str/includes? sheet "s=\"1\"") "the cell carries an index")
+    (is (str/includes? styles "<cellXfs") "and cellXfs is what it indexes")
+    (is (str/includes? styles "<b/>"))
+    (is (str/includes? styles "applyFont=\"1\"") "without which Excel ignores the font")
+    (is (str/includes? styles "numFmtId=\"164\"") "custom formats start at 164")
+    (is (str/includes? styles "applyNumberFormat=\"1\""))))
+
+(deftest position-zero-is-the-default-and-always-exists
+  ;; A cell with no `s` means cellXfs position 0, so a workbook with no
+  ;; styles still needs the part — one without it opens with a repair
+  ;; prompt.
+  (let [files (xlsx/xlsx-files (plan))
+        styles (get files "xl/styles.xml")]
+    (is (some? styles))
+    (is (str/includes? styles "<cellXfs count=\"1\">"))
+    ;; On a `<c>`, not anywhere — `xmlns="` contains `s="`, which is what
+    ;; the first version of this assertion was matching.
+    (is (nil? (re-find #"<c [^>]*s=\"" (get files "xl/worksheets/sheet1.xml"))))))
+
+(deftest two-cells-with-one-style-share-one-entry
+  ;; Otherwise a header row of twenty bold cells writes twenty identical
+  ;; cellXfs entries.
+  (let [wb (m/add-tab (m/workbook "wb")
+                      (reduce (fn [tab c] (-> tab (m/put-cell 1 c "x")
+                                              (m/put-cell-style 1 c {:bold true})))
+                              (m/tab "t" {:sheets/title "t"})
+                              (range 1 6)))
+        styles (get (xlsx/xlsx-files wb) "xl/styles.xml")]
+    (is (str/includes? styles "<cellXfs count=\"2\">") "the default and one style")))
+
+(deftest a-formatted-empty-cell-keeps-its-format
+  ;; Formatting applied to a column nobody has filled in yet. A writer that
+  ;; only emits cells with content loses it.
+  (let [wb (m/add-tab (m/workbook "wb")
+                      (m/put-cell-style (m/tab "t" {:sheets/title "t"}) 1 1 {:bold true}))
+        back (m/tab-by-id (xlsx/workbook-from-files (xlsx/xlsx-files wb)) "t")]
+    (is (= {:bold true} (:sheets/style (m/get-cell back 1 1))))
+    (is (nil? (:sheets/value (m/get-cell back 1 1))))))
+
+(deftest what-a-style-still-loses-is-named-by-key
+  ;; Not "the style is dropped" any more — weight, slant, underline,
+  ;; alignment and a number format are written. What is left is named.
+  (let [wb (m/add-tab (m/workbook "wb")
+                      (-> (m/tab "t" {:sheets/title "t"})
+                          (m/put-cell 1 1 "x")
+                          (m/put-cell-style 1 1 {:bold true :color "red"
+                                                 :border :thin})))
+        [entry] (xlsx/unexpressed wb)]
+    (is (= :xlsx/cell-style-parts-dropped (:sheets/code entry)))
+    (is (str/includes? (:sheets/msg entry) "border"))
+    (is (str/includes? (:sheets/msg entry) "color"))
+    (is (not (str/includes? (:sheets/msg entry) "bold")) "which is written"))
+  ;; A style made only of things that are written reports nothing.
+  (is (= [] (xlsx/unexpressed (styled)))))
+
+(deftest a-date-and-a-style-can-be-on-the-same-cell
+  ;; Both are read from the same `s` index, so this is the case where one
+  ;; could quietly shadow the other.
+  (let [files (assoc (xlsx/xlsx-files (m/workbook "wb"))
+                     "xl/styles.xml"
+                     (str "<styleSheet><fonts><font/><font><b/></font></fonts>"
+                          "<cellXfs><xf numFmtId=\"0\" fontId=\"0\"/>"
+                          "<xf numFmtId=\"14\" fontId=\"1\" applyFont=\"1\"/>"
+                          "</cellXfs></styleSheet>")
+                     "xl/worksheets/sheet1.xml"
+                     (str "<worksheet><sheetData><row r=\"1\">"
+                          "<c r=\"A1\" s=\"1\"><v>45000</v></c>"
+                          "</row></sheetData></worksheet>"))
+        tab (first (vals (:sheets/tabs (xlsx/workbook-from-files files))))
+        cell (m/get-cell tab 1 1)]
+    (is (= "2023-03-15" (:sheets/value cell)) "read as a date")
+    (is (= {:bold true} (:sheets/style cell)) "and as bold")))

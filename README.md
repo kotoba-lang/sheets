@@ -182,6 +182,28 @@ schema fixes that order and Excel refuses a file that gets it wrong. Only a
 name pointing at a tab the workbook does not have is still dropped, and
 `unexpressed` reports exactly those rather than all of them.
 
+## Cell styles
+
+Weight, slant, underline, horizontal alignment and a number format are
+written and read back. They were the largest of the losses `unexpressed`
+reported: a file whose header row was bold came back plain, and going out
+again lost it for good.
+
+A style is two levels of indirection — cell → `cellXfs` entry → font and
+`numFmt` — and that is what made it the largest. A writer that emits a
+`<font b="1"/>` and nothing else produces a file Excel opens with no bold in
+it, because nothing pointed at the font. `applyFont="1"` matters for the
+same reason.
+
+`xl/styles.xml` is written even by a workbook with no styles: a cell with no
+`s` attribute means `cellXfs` position 0, and a package missing the part
+opens with a repair prompt. Two cells with one style share one entry, so a
+header row of twenty bold cells writes one.
+
+The vocabulary is closed on purpose — `:sheets/style` is an open map in the
+model. What is left, a colour or a border or a font family, is reported **by
+key**: not "the style is dropped" but "`border`、`color` are not written".
+
 ## Where a column letter lives
 
 `sheets.model/column-name` and `column-number`. They were in `sheets.xlsx`,
