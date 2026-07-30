@@ -205,11 +205,20 @@
 
   `{:id :title :svg}` per chart, and a chart whose range holds no numbers
   appears with `:svg` nil rather than being left out — a chart somebody
-  defined and cannot see is a thing to say, not a thing to hide."
+  defined and cannot see is a thing to say, not a thing to hide.
+
+  A chart's `:sheets/tab` is matched against the tab's **title**, falling
+  back to its id — the same rule `names-of` and `sheets.xlsx` use, and for
+  the same reason. The map key a tab is stored under and the name a person
+  writes are different things; matching the key resolves only in a workbook
+  where they happen to coincide, which is not the workbook an application
+  builds. This is the third function to have to choose, and the second to
+  get it wrong first."
   [workbook tab-id]
-  (let [tab (model/tab-by-id workbook tab-id)]
+  (let [tab (model/tab-by-id workbook tab-id)
+        tab-name (or (:sheets/title tab) tab-id)]
     (->> (:sheets/charts workbook)
-         (filter #(or (nil? (:sheets/tab %)) (= tab-id (:sheets/tab %))))
+         (filter #(contains? #{nil tab-id tab-name} (:sheets/tab %)))
          (mapv (fn [chart]
                  {:id (:sheets/id chart)
                   :title (:sheets/title chart)

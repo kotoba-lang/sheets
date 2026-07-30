@@ -105,3 +105,26 @@
   (doseq [c [{} {:sheets/data-range nil} {:sheets/data-range 42}
              {:sheets/data-range "A1"} {:sheets/data-range "A1:"}]]
     (is (nil? (chart/svg (m/tab "t" {}) c)) (pr-str c))))
+
+(deftest a-chart-finds-its-tab-by-title-or-by-key
+  ;; The map key a tab is stored under and the name a person writes are
+  ;; different things. Matching only the key resolves in a workbook where
+  ;; they coincide and in no other — which is not the workbook an
+  ;; application builds, where the key is an id and the title is what a
+  ;; person sees. `names-of` and `sheets.xlsx` had to make the same choice.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (assoc (quarters) :sheets/id "sheet1"
+                                 :sheets/title "売上"))
+               (m/add-chart {:sheets/id "by-title" :sheets/tab "売上"
+                             :sheets/data-range "A1:B3"})
+               (m/add-chart {:sheets/id "by-key" :sheets/tab "sheet1"
+                             :sheets/data-range "A1:B3"})
+               (m/add-chart {:sheets/id "unattached" :sheets/data-range "A1:B3"})
+               (m/add-chart {:sheets/id "elsewhere" :sheets/tab "別表"
+                             :sheets/data-range "A1:B3"}))
+        wb (assoc-in wb [:sheets/tabs "sheet1"]
+                     (assoc (quarters) :sheets/id "sheet1" :sheets/title "売上"))
+        drawn (chart/charts-of wb "sheet1")]
+    (is (= ["by-title" "by-key" "unattached"] (mapv :id drawn))
+        "and not the one attached to another tab")
+    (is (every? :svg drawn))))
