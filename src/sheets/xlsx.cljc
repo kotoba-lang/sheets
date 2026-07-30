@@ -118,7 +118,50 @@
   [workbook]
   (mapv #(get (:sheets/tabs workbook) %) (sort (keys (:sheets/tabs workbook)))))
 
-(defn- workbook-xml [tabs]
+(defn- absolute-ref
+  "`A1` → `$A$1`.
+
+  A defined name is written absolute because it does not move when a formula
+  referring to it is copied — which is the whole difference between a name
+  and an address. Built rather than substituted: a `$` in a regex
+  replacement is a group reference, and writing it as one produced an
+  `Illegal group reference` instead of a workbook."
+  [ref]
+  (if-let [[_ letters digits] (re-matches #"\$?([A-Za-z]+)\$?(\d+)" (str ref))]
+    (str "$" letters "$" digits)
+    (str ref)))
+
+(defn- defined-names-xml
+  "`<definedNames>` — the workbook's named ranges.
+
+  A name is written as the reference a formula would use: `'売上表'!$A$1:$A$3`.
+  The sheet name is quoted always rather than only when it needs to be,
+  because the rule for when it needs to be is about spaces and punctuation
+  and getting it wrong produces a file Excel refuses to open.
+
+  A name whose tab is not in this workbook is dropped: writing a reference
+  to a sheet that is not there is a file that opens with a broken name in
+  it, which is worse than a file without the name."
+  [workbook tabs]
+  (let [titles (into #{} (map #(or (:sheets/title %) (:sheets/id %))) tabs)
+        usable (->> (:sheets/named-ranges workbook)
+                    (filter (fn [[_ range]]
+                              (and (:sheets/tab range) (:sheets/range range)
+                                   (contains? titles (:sheets/tab range))))))]
+    (when (seq usable)
+      (str "<definedNames>"
+           (apply str
+                  (for [[name range] usable]
+                    (str "<definedName name=\"" (ooxml/xml-esc (str name)) "\">"
+                         "'" (ooxml/xml-esc (str (:sheets/tab range))) "'!"
+                         (->> (str/split (str (:sheets/range range)) #":")
+                              (map absolute-ref)
+                              (str/join ":")
+                              ooxml/xml-esc)
+                         "</definedName>")))
+           "</definedNames>"))))
+
+(defn- workbook-xml [workbook tabs]
   (str "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
        "<workbook xmlns=\"" main-ns "\" xmlns:r=\"" rels-ns "\"><sheets>"
        (apply str
@@ -130,7 +173,11 @@
                       "\" sheetId=\"" (inc index)
                       "\" r:id=\"rId" (inc index) "\"/>"))
                tabs))
-       "</sheets></workbook>"))
+       "</sheets>"
+       ;; After `<sheets>`: the schema fixes the order of these elements and
+       ;; Excel refuses a file that gets it wrong.
+       (defined-names-xml workbook tabs)
+       "</workbook>"))
 
 (defn xlsx-files
   "Every part of the .xlsx, as path → text.
@@ -163,7 +210,7 @@
                              :type (str rels-ns "/officeDocument")
                              :target "xl/workbook.xml"})])
 
-      "xl/workbook.xml" (workbook-xml tabs)
+      "xl/workbook.xml" (workbook-xml workbook tabs)
 
       "xl/_rels/workbook.xml.rels"
       (ooxml/relationships-xml
@@ -239,10 +286,18 @@
             :when (some :sheets/style (vals (:sheets/cells tab)))]
         (entry :xlsx/cell-styles-dropped (:sheets/id tab)
                "セルの書式（色・太字・表示形式）は書き出されません。"))
-      (when (seq (:sheets/named-ranges workbook))
-        [(entry :xlsx/named-ranges-dropped (:sheets/id workbook)
-                (str (count (:sheets/named-ranges workbook))
-                     " 件の名前付き範囲は書き出されません。"))])
+      ;; Named ranges are written now, so only the ones that cannot be are
+      ;; reported: a name pointing at a tab this workbook does not have
+      ;; would become a reference to a sheet that is not there, which is a
+      ;; file that opens with a broken name in it.
+      (let [titles (into #{} (map #(or (:sheets/title %) (:sheets/id %))) tabs)
+            orphans (remove (fn [[_ range]] (contains? titles (:sheets/tab range)))
+                            (:sheets/named-ranges workbook))]
+        (when (seq orphans)
+          [(entry :xlsx/named-ranges-dropped (:sheets/id workbook)
+                  (str (count orphans)
+                       " 件の名前付き範囲は、存在しないタブを指しているため"
+                       "書き出されません。"))]))
       (when (seq (:sheets/charts workbook))
         [(entry :xlsx/charts-dropped (:sheets/id workbook)
                 (str (count (:sheets/charts workbook))

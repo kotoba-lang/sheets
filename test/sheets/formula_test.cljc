@@ -215,3 +215,55 @@
   ;; convention rather than a general one, and worth a test saying so.
   (is (= "2" (calc "COUNTIF(B1:B3,\">1000\")")))
   (is (= "0" (calc "COUNTIF(B1:B3,\"1000\")")) "equality, and nothing equals 1000"))
+
+;; ── named ranges ────────────────────────────────────────────────────────────
+
+(defn- named-book []
+  (-> (m/workbook "wb")
+      (m/add-tab (-> (m/tab "売上表" {:sheets/title "売上表"})
+                     (m/put-cell 1 1 "1200") (m/put-cell 2 1 "1300")
+                     (m/put-cell 3 1 "1500")))
+      (m/add-named-range "売上" {:sheets/tab "売上表" :sheets/range "A1:A3"})))
+
+(defn- book-calc [expr]
+  (let [wb (update-in (named-book) [:sheets/tabs "売上表"]
+                      m/put-formula 9 1 expr)]
+    (get-in (f/workbook-values wb) ["売上表" [9 1]])))
+
+(deftest a-name-stands-for-the-range-it-names
+  (is (= "4000" (book-calc "SUM(売上)")))
+  (is (= "3" (book-calc "COUNT(売上)")))
+  (is (= "1500" (book-calc "MAX(売上)")))
+  ;; And behaves like the addresses it replaces, not like a second kind of
+  ;; thing — the same answer as writing them out.
+  (is (= (book-calc "SUM(A1:A3)") (book-calc "SUM(売上)"))))
+
+(deftest a-name-nobody-defined-is-not-a-cell
+  ;; Excel's answer for a word it does not know. It used to be `#REF!`,
+  ;; which is what a *broken address* says — a different thing.
+  (is (= "#NAME?" (book-calc "SUM(不明)")))
+  (is (= "#NAME?" (book-calc "不明+1"))))
+
+(deftest a-name-can-be-written-in-any-script
+  ;; The tokeniser stops at operators and punctuation rather than allowing a
+  ;; list of ASCII letters. An allowlist would make every non-English name
+  ;; unspellable, which is a strange thing for this to decide.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (-> (m/tab "t" {:sheets/title "t"})
+                              (m/put-cell 1 1 "7")
+                              (m/put-formula 2 1 "SUM(合計_2026)")))
+               (m/add-named-range "合計_2026" {:sheets/tab "t" :sheets/range "A1:A1"}))]
+    (is (= "7" (get-in (f/workbook-values wb) ["t" [2 1]])))))
+
+(deftest a-name-pointing-at-another-tab-is-not-resolved-here
+  ;; A name belongs to the workbook and a range belongs to a tab. Resolving
+  ;; one against the wrong sheet would be an answer computed from the wrong
+  ;; numbers, which is worse than no answer.
+  (let [wb (-> (named-book)
+               (m/add-tab (-> (m/tab "別表" {:sheets/title "別表"})
+                              (m/put-formula 1 1 "SUM(売上)"))))]
+    (is (= "#NAME?" (get-in (f/workbook-values wb) ["別表" [1 1]])))
+    (is (= "4000" (get-in (f/workbook-values
+                           (update-in wb [:sheets/tabs "売上表"]
+                                      m/put-formula 9 1 "SUM(売上)"))
+                          ["売上表" [9 1]])))))

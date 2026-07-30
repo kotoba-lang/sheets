@@ -401,3 +401,38 @@
               {:sheets/tabs {"t" {:sheets/cells nil}}}
               {:sheets/named-ranges {}} {:sheets/charts []}]]
     (is (vector? (xlsx/unexpressed wb)) (pr-str wb))))
+
+(deftest named-ranges-are-written
+  ;; They used to be dropped, and `unexpressed` said so. Written as the
+  ;; reference a formula would use, with the sheet name quoted always —
+  ;; the rule for when it must be is about spaces and punctuation, and
+  ;; getting it wrong produces a file Excel refuses to open.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (m/tab "売上表" {:sheets/title "売上表"}))
+               (m/add-named-range "売上" {:sheets/tab "売上表"
+                                          :sheets/range "A1:A3"}))
+        xml (get (xlsx/xlsx-files wb) "xl/workbook.xml")]
+    (is (str/includes? xml "<definedNames>"))
+    (is (str/includes? xml "<definedName name=\"売上\">"))
+    (is (str/includes? xml "'売上表'!$A$1:$A$3"))
+    ;; After </sheets>: the schema fixes the order and Excel refuses a file
+    ;; that gets it wrong.
+    (is (< (.indexOf xml "</sheets>") (.indexOf xml "<definedNames>"))))
+  ;; A workbook with none writes no element at all rather than an empty one.
+  (is (not (str/includes? (get (xlsx/xlsx-files (m/workbook "wb")) "xl/workbook.xml")
+                          "definedNames"))))
+
+(deftest a-name-pointing-at-a-missing-tab-is-dropped-and-reported
+  ;; Writing a reference to a sheet that is not there is a file that opens
+  ;; with a broken name in it, which is worse than a file without the name.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (m/tab "売上表" {:sheets/title "売上表"}))
+               (m/add-named-range "良い" {:sheets/tab "売上表" :sheets/range "A1:A3"})
+               (m/add-named-range "迷子" {:sheets/tab "無い表" :sheets/range "A1:A3"}))
+        xml (get (xlsx/xlsx-files wb) "xl/workbook.xml")]
+    (is (str/includes? xml "良い"))
+    (is (not (str/includes? xml "迷子")))
+    ;; And only that one is reported as a loss now.
+    (let [entries (xlsx/unexpressed wb)]
+      (is (= [:xlsx/named-ranges-dropped] (mapv :sheets/code entries)))
+      (is (str/includes? (:sheets/msg (first entries)) "1 件")))))
