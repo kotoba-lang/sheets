@@ -467,14 +467,22 @@
   A name belongs to the workbook and a range belongs to a tab, so a name
   pointing at another tab is not resolvable from here — it is dropped rather
   than resolved against the wrong sheet, which would be an answer computed
-  from the wrong numbers."
-  [workbook tab-id]
-  (into {}
-        (keep (fn [[name range]]
-                (when (= tab-id (:sheets/tab range))
-                  (let [[from to] (str/split (str (:sheets/range range)) #":" 2)]
-                    (when (and from to) [(str name) {:from from :to to}])))))
-        (:sheets/named-ranges workbook)))
+  from the wrong numbers.
+
+  The tab is matched by its **title**, falling back to its id when it has
+  none — the same rule `sheets.xlsx` uses to write a `definedName`, because
+  a `definedName` references a sheet by its name and that is what somebody
+  defining a range writes. Matching the map key instead resolved a name in a
+  workbook whose tabs happen to be keyed by their titles and in no other,
+  which is every workbook this Drive creates."
+  [workbook tab]
+  (let [tab-name (or (:sheets/title tab) (:sheets/id tab))]
+    (into {}
+          (keep (fn [[name range]]
+                  (when (= tab-name (:sheets/tab range))
+                    (let [[from to] (str/split (str (:sheets/range range)) #":" 2)]
+                      (when (and from to) [(str name) {:from from :to to}])))))
+          (:sheets/named-ranges workbook))))
 
 (defn values
   "Every cell of `tab` as what it comes to, keyed the same way the cells are.
@@ -497,5 +505,5 @@
   [workbook]
   (into {}
         (map (fn [[tab-id tab]]
-               [tab-id (values tab {:names (names-of workbook tab-id)})]))
+               [tab-id (values tab {:names (names-of workbook tab)})]))
         (:sheets/tabs workbook)))
