@@ -128,3 +128,90 @@
     (is (= ["by-title" "by-key" "unattached"] (mapv :id drawn))
         "and not the one attached to another tab")
     (is (every? :svg drawn))))
+
+;; ── the picture, not the string ─────────────────────────────────────────────
+;;
+;; Everything above asks whether an element is in the SVG. All of it passed
+;; while the axis label read `000`, because `4000` was in the string and two
+;; pixels outside the frame. These ask where things are.
+
+(defn- texts
+  "Every `<text>` drawn, as `{:x :anchor :size :text}`."
+  [svg]
+  (for [[_ x anchor size text]
+        (re-seq #"<text x=\"([-0-9.]+)\" y=\"[-0-9.]+\"(?: text-anchor=\"([a-z]+)\")? font-size=\"([0-9.]+)\"[^>]*>([^<]*)</text>"
+                (str svg))]
+    {:x #?(:clj (Double/parseDouble x) :cljs (js/parseFloat x))
+     :anchor (or anchor "start")
+     :size #?(:clj (Double/parseDouble size) :cljs (js/parseFloat size))
+     :text text}))
+
+(defn- extent
+  "Roughly where a label starts and ends, estimated here rather than asked of
+  the drawing — a test that measures with the code's own ruler cannot catch
+  the code's own ruler being wrong. A shade wider than the estimate in
+  `sheets.chart`, so it errs towards calling a fit a collision."
+  [{:keys [x anchor size text]}]
+  (let [wide (count (re-seq #"[^ -ÿ]" text))
+        w (* size (+ wide (* 0.6 (- (count text) wide))))]
+    (case anchor
+      "end" [(- x w) x]
+      "middle" [(- x (/ w 2)) (+ x (/ w 2))]
+      [x (+ x w)])))
+
+(deftest every-label-is-inside-the-picture
+  ;; `4000` was written with its end four pixels left of an axis at 24, so it
+  ;; began at about -2 and the chart read `000`. Nothing in the string was
+  ;; wrong. The margin is the label's width now, which is a rule rather than
+  ;; a number, so this holds for a four-digit total and a seven-digit one.
+  (doseq [kind [:bar :line :pie]
+          scale ["1200" "12000000" "7"]]
+    (let [tab (-> (m/tab "t" {:sheets/title "売上"})
+                  (m/put-cell 1 1 "第1四半期") (m/put-cell 1 2 scale)
+                  (m/put-cell 2 1 "第2四半期") (m/put-cell 2 2 "800"))
+          out (chart/svg tab {:sheets/id "c" :sheets/data-range "A1:B2"
+                              :sheets/chart-type kind})]
+      (doseq [t (texts out)]
+        (let [[x0 x1] (extent t)]
+          (is (<= -0.5 x0) (str kind " " scale ": " (:text t) " starts at " x0))
+          (is (<= x1 320.5) (str kind " " scale ": " (:text t) " ends at " x1)))))))
+
+(deftest a-bar-is-labelled-with-what-it-counts
+  ;; The chart knew what every bar was called and drew nothing to say so: a
+  ;; quarterly total was four blue rectangles unless you hovered over one.
+  (let [out (draw "A1:B3")]
+    (doseq [q ["Q1" "Q2" "Q3"]]
+      (is (str/includes? out (str ">" q "</text>")) q))))
+
+(deftest labels-thin-out-rather-than-overlap
+  ;; Twelve months in 320 pixels overlap into a grey band. Every other one is
+  ;; a chart you can read, and the ones not drawn are still in the tooltips.
+  (let [tab (reduce (fn [t i] (-> t (m/put-cell i 1 (str i "月という長い名前"))
+                                  (m/put-cell i 2 (str (* i 100)))))
+                    (m/tab "t" {}) (range 1 13))
+        out (chart/svg tab {:sheets/id "c" :sheets/data-range "A1:B12"})
+        drawn (filter #(str/includes? (:text %) "月") (texts out))]
+    (is (seq drawn) "some month is named")
+    (is (< (count drawn) 12) "and not all twelve on top of each other")
+    ;; Whatever is drawn does not touch its neighbour.
+    (doseq [[a b] (partition 2 1 (sort-by :x drawn))]
+      (is (<= (second (extent a)) (first (extent b)))
+          (str (:text a) " runs into " (:text b))))))
+
+(deftest a-pie-has-a-key-and-says-what-it-left-out
+  ;; A slice has no room to be labelled, so the labels were in tooltips
+  ;; alone. A key that shows four of nine categories and does not say so is
+  ;; read as a chart of four.
+  (let [tab (reduce (fn [t i] (-> t (m/put-cell i 1 (str "分類" i))
+                                  (m/put-cell i 2 "100")))
+                    (m/tab "t" {}) (range 1 21))
+        out (chart/svg tab {:sheets/id "c" :sheets/data-range "A1:B20"
+                            :sheets/chart-type :pie})]
+    (is (str/includes? out ">分類1</text>"))
+    (is (re-find #">ほか \d+ 件</text>" out) out)))
+
+(deftest a-line-shows-its-readings
+  ;; A line says which way things went; nothing said what any of them was.
+  (let [out (draw "A1:B3" :line)]
+    (is (= 3 (count (re-seq #"<circle" out))))
+    (is (str/includes? out "<title>Q2: 800</title>"))))
