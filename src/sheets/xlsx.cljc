@@ -213,6 +213,56 @@
            (.closeEntry zip)))
        (.toByteArray out))))
 
+;; ── what a .xlsx cannot carry ────────────────────────────────────────────────
+
+(defn unexpressed
+  "What `xlsx-files` will drop from this workbook, one entry per thing.
+
+  Shaped like `sheets.validate/problems` — severity, code, id, message — so
+  a caller that already renders problems can render these without learning a
+  second shape. All of them are `:info`: a format not carrying something is
+  a property of the format, not a fault in the workbook.
+
+  The point is that a workbook can be asked what it will lose *before*
+  somebody exports it rather than after. Three things this writer does not
+  write, each of which the model holds:
+
+  `:sheets/style` on a cell — colours, weight, number formats. Writing them
+  would mean a `styles.xml` with a `cellXfs` entry per distinct style and a
+  style index on every cell, which is a real piece of work and not one this
+  Drive has needed. The reader already parses that part, for dates.
+
+  `:sheets/named-ranges` — `definedName` entries in the workbook part.
+
+  `:sheets/charts` — a chart part per chart, each with its own
+  relationships and cached data.
+
+  What is *not* here, because it is not a loss: a formula is written and not
+  evaluated, which is correct — Excel recalculates on open. And every value
+  is written as text, which is what the model holds."
+  [workbook]
+  (let [entry (fn [code id msg]
+                {:sheets/severity :info :sheets/code code :sheets/id id
+                 :sheets/msg msg})
+        tabs (vals (:sheets/tabs workbook))]
+    (vec
+     (concat
+      ;; Once per tab rather than once per cell: the answer is the same for
+      ;; every one of them, and a workbook with a styled header row would
+      ;; otherwise report a column's worth of identical warnings.
+      (for [tab tabs
+            :when (some :sheets/style (vals (:sheets/cells tab)))]
+        (entry :xlsx/cell-styles-dropped (:sheets/id tab)
+               "セルの書式（色・太字・表示形式）は書き出されません。"))
+      (when (seq (:sheets/named-ranges workbook))
+        [(entry :xlsx/named-ranges-dropped (:sheets/id workbook)
+                (str (count (:sheets/named-ranges workbook))
+                     " 件の名前付き範囲は書き出されません。"))])
+      (when (seq (:sheets/charts workbook))
+        [(entry :xlsx/charts-dropped (:sheets/id workbook)
+                (str (count (:sheets/charts workbook))
+                     " 件のグラフは書き出されません。"))])))))
+
 ;; ── dates, which are numbers wearing a format ───────────────────────────────
 ;;
 ;; Excel has no date type. A date is a number counting days from an epoch,
