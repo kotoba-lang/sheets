@@ -355,3 +355,49 @@
                         "<sheets><sheet name=\"Log\" r:id=\"rId1\"/></sheets></workbook>")))]
     (is (= {:sheets/value "2027-03-16"}
            (m/get-cell (m/tab-by-id wb "Log") 1 2)))))
+
+;; ── what a .xlsx cannot carry ───────────────────────────────────────────────
+
+(deftest a-workbook-with-nothing-to-lose-says-nothing
+  (is (= [] (xlsx/unexpressed (plan))))
+  (is (= [] (xlsx/unexpressed (m/workbook "empty")))))
+
+(deftest cell-styles-are-named-once-per-tab
+  ;; Once per tab, not once per cell: the answer is the same for every one,
+  ;; and a styled header row would otherwise report a column's worth of
+  ;; identical warnings.
+  (let [wb (m/add-tab (m/workbook "wb")
+                      (-> (m/tab "売上" {:sheets/title "売上"})
+                          (m/put-cell 1 1 "四半期")
+                          (m/put-cell 1 2 "金額")
+                          (m/put-cell-style 1 1 {:bold true})
+                          (m/put-cell-style 1 2 {:bold true})))
+        entries (xlsx/unexpressed wb)]
+    (is (= 1 (count entries)))
+    (is (= :xlsx/cell-styles-dropped (:sheets/code (first entries))))
+    (is (= "売上" (:sheets/id (first entries))))
+    (is (= :info (:sheets/severity (first entries)))
+        "a format not carrying something is a property of the format")))
+
+(deftest named-ranges-and-charts-are-named
+  (let [wb (-> (m/workbook "wb")
+               (m/add-named-range "総計" {:sheets/ref "A1:B9"})
+               (m/add-chart {:sheets/id "c1" :sheets/type :bar}))
+        codes (set (map :sheets/code (xlsx/unexpressed wb)))]
+    (is (contains? codes :xlsx/named-ranges-dropped))
+    (is (contains? codes :xlsx/charts-dropped))))
+
+(deftest a-formula-is-not-a-loss
+  ;; Written and not evaluated, which is correct — Excel recalculates on
+  ;; open. Reporting it would be reporting the format working.
+  (let [wb (m/add-tab (m/workbook "wb")
+                      (-> (m/tab "t" {:sheets/title "t"})
+                          (m/put-formula 1 1 "SUM(A2:A9)")))]
+    (is (= [] (xlsx/unexpressed wb)))))
+
+(deftest unexpressed-does-not-throw-on-a-half-built-workbook
+  ;; Workbooks arrive from a wire projection and a hand-edited JSON pane.
+  (doseq [wb [{} {:sheets/tabs nil} {:sheets/tabs {"t" {}}}
+              {:sheets/tabs {"t" {:sheets/cells nil}}}
+              {:sheets/named-ranges {}} {:sheets/charts []}]]
+    (is (vector? (xlsx/unexpressed wb)) (pr-str wb))))
