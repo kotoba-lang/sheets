@@ -96,6 +96,47 @@ Rehydrate before validating. `sheets.validate` reads namespaced keys, and on
 a projected payload it finds none — reporting no problems rather than
 reporting that it cannot see any.
 
+## Formulas compute
+
+A workbook could hold `=SUM(B2:B9)` and never compute one. `sheets.xlsx`
+writes `<f>` with no cached value on purpose — Excel recalculates on open —
+but inside a viewer that is not Excel the cell showed the text for ever.
+
+```clojure
+(f/value-at tab 4 2)   ; what that cell comes to now
+(f/values tab)         ; every cell, keyed the way the cells are
+```
+
+**Nothing is stored.** A computed value written back into `:sheets/value`
+would be a second copy of something derived — stale the moment an input
+changes and afterwards indistinguishable from a value somebody typed.
+
+**Cells hold text and that is not undone.** Evaluation parses text to a
+number where a number is required and says so when it cannot; it does not
+decide `0042` was a number all along. Which is Excel's rule: `=A1+1` over
+text is `#VALUE!`, while `=SUM(A1:A9)` ignores the text in the range —
+arithmetic asks for a number, an aggregate asks for the numbers there are.
+
+**Errors are values.** `#DIV/0!` `#VALUE!` `#NAME?` `#REF!` `#CIRCULAR!`,
+and they propagate: a sum over a range containing one is that error, because
+a total that silently omitted it would be a number nobody can see is wrong.
+A cell that refers to itself, directly or round a loop, is `#CIRCULAR!`
+rather than a stack overflow.
+
+Implemented: `+ - * / ^`, comparison, `&`, `SUM AVERAGE COUNT COUNTA MIN MAX
+ABS ROUND IF`, ranges, and `$A$1` accepted and ignored. Not implemented:
+everything else, which is `#NAME?` rather than a crash.
+
+## Where a column letter lives
+
+`sheets.model/column-name` and `column-number`. They were in `sheets.xlsx`,
+which made addressing look like a fact about a file format; it is not, and
+the cost of the copy was that the same host-portability bug got written
+twice — `(int ch)` is a code point on the JVM and 0 in ClojureScript, so the
+arithmetic version read every column as 1 under cljs. Fixed once in `xlsx`,
+then reintroduced verbatim in `formula` before the tests caught it. There is
+one of them now.
+
 ## Test
 
 ```bash

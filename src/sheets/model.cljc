@@ -1,4 +1,5 @@
-(ns sheets.model)
+(ns sheets.model
+  (:require [clojure.string]))
 
 (defn workbook
   ([id] (workbook id {}))
@@ -17,6 +18,45 @@
            :sheets/title id
            :sheets/cells {}}
           attrs)))
+
+(def alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+(defn column-name
+  "1 → A, 26 → Z, 27 → AA.
+
+  Bijective base-26: there is no zero digit, so the usual division has to
+  borrow one before each step. Getting this wrong gives a workbook whose
+  27th column is `BA`, which Excel opens without complaint and reads wrong.
+
+  The letter comes out of `alphabet` by index rather than out of arithmetic
+  on a character code. `(int ch)` does not mean the same thing on both
+  hosts — on the JVM a character is a `Character` and `int` is its code
+  point; in ClojureScript it is a one-character string and `int` coerces it
+  to 0 — so the arithmetic version silently produced control characters and
+  read every column as 1 under cljs.
+
+  This lives here rather than in `sheets.xlsx`, where it was, because
+  addressing is not a fact about a file format. It was written twice and got
+  the same bug both times."
+  [col]
+  (loop [n (long col) out ""]
+    (if (pos? n)
+      (let [rem (mod (dec n) 26)]
+        (recur (quot (dec n) 26) (str (subs alphabet rem (inc rem)) out)))
+      out)))
+
+(defn column-number
+  "`A` → 1, `AA` → 27. The inverse of `column-name`, and nil for anything
+  that is not all letters."
+  [letters]
+  (let [s (clojure.string/upper-case (str letters))]
+    (when (seq s)
+      (reduce (fn [n ch]
+                (if-let [i (clojure.string/index-of alphabet ch)]
+                  (+ (* 26 n) (inc i))
+                  (reduced nil)))
+              0
+              s))))
 
 (defn cell-key [row col]
   [(long row) (long col)])

@@ -68,27 +68,12 @@
 (def ^:private rels-ns
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
 
-(def ^:private alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
 (defn column-name
-  "1 → A, 26 → Z, 27 → AA.
-
-  Bijective base-26: there is no zero digit, so the usual division has to
-  borrow one before each step. Getting this wrong gives a workbook whose
-  27th column is `BA`, which Excel opens without complaint and reads wrong.
-
-  The letter comes out of `alphabet` by index rather than out of arithmetic
-  on a character code — see `column-number` for why `(int \\A)` is not
-  portable. Here it was worse than wrong: `(char (+ 0 rem))` produced control
-  characters, so every cell reference in a workbook written from nbb was
-  unprintable."
+  "1 → A, 26 → Z, 27 → AA. `sheets.model` owns this now — addressing is not a
+  fact about a file format, and keeping a copy here is how the same
+  host-portability bug got written twice."
   [col]
-  (loop [n (long col) out ""]
-    (if (pos? n)
-      (let [rem (mod (dec n) 26)]
-        (recur (quot (dec n) 26)
-               (str (subs alphabet rem (inc rem)) out)))
-      out)))
+  (model/column-name col))
 
 (defn cell-ref [row col]
   (str (column-name col) row))
@@ -436,25 +421,9 @@
 ;; all, and its formulas carry the value Excel last calculated.
 
 (defn column-number
-  "`A` → 1, `AA` → 27. The inverse of `column-name`, and the same borrowing
-  in the other direction. Nil for anything that is not all letters.
-
-  The position is looked up in `alphabet` rather than computed from a
-  character code, because `(int ch)` does not mean the same thing on both
-  hosts: on the JVM a character is a `Character` and `int` is its code
-  point, in ClojureScript it is a one-character string and `int` coerces it
-  to 0. That made every column read as 1 under cljs — invisibly, because A
-  *is* 1, and `AA` came out as 27 by coincidence. Portable code that reaches
-  for `int` on a character is making a host assumption it does not state."
+  "`A` → 1, `AA` → 27. See `sheets.model/column-number`."
   [letters]
-  (let [s (str/upper-case (str letters))]
-    (when (seq s)
-      (reduce (fn [n ch]
-                (if-let [i (str/index-of alphabet ch)]
-                  (+ (* 26 n) (inc i))
-                  (reduced nil)))
-              0
-              s))))
+  (model/column-number letters))
 
 (defn parse-ref
   "`B12` → `[12 2]`. Nil for anything that is not a cell reference, so a
