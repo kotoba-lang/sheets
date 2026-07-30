@@ -99,8 +99,16 @@ reporting that it cannot see any.
 ## Test
 
 ```bash
-clojure -X:test
+clojure -X:test                                                  # JVM
+nbb --classpath "src:test:$(clojure -Spath)" scripts/test-cljs.cljs   # ClojureScript
 ```
+
+Run both. This is a `.cljc` library and the JVM suite passed for as long as
+`sheets.xlsx` had two bugs that existed only under ClojureScript: `(int \A)`
+is a code point on the JVM and `0` in cljs, so `column-name` wrote control
+characters where cell references belong and `column-number` read every
+column as column 1. Neither is visible from one host — column A is 1 either
+way, and `AA` came out as 27 by coincidence.
 
 ## Kotoba bounded profile
 
