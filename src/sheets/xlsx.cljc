@@ -28,13 +28,27 @@
 
   A formula cell writes `<f>` and no `<v>`. There is no evaluator in this
   library, so a cached value is not something it could write — Excel
-  recalculates on open, which is the correct outcome and not a workaround."
+  recalculates on open, which is the correct outcome and not a workaround.
+
+  ## Reading meets more shapes than writing chose
+
+  A .xlsx from Excel is not the one this namespace produces: its strings are
+  in a shared table, its numbers carry no `t` at all, and its formulas come
+  with the value Excel last calculated. The reader handles all of them and
+  keeps the formula rather than the cached value — see `cell-value`.
+
+  What it does not handle is styles, and therefore dates: Excel stores a
+  date as a serial number whose *format* is what makes it a date, so one
+  arrives here as `45000` rather than a day. Reading styles is the next
+  thing this needs, and pretending otherwise would put a wrong date in a
+  cell rather than an obvious number."
   (:require [clojure.string :as str]
             [ooxml.core :as ooxml]
             [sheets.csv :as csv]
-            [sheets.model :as model])
-  #?(:clj (:import [java.io ByteArrayOutputStream]
-                   [java.util.zip ZipEntry ZipOutputStream])))
+            [sheets.model :as model]
+            [xml.parse :as xml])
+  #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
+                   [java.util.zip ZipEntry ZipInputStream ZipOutputStream])))
 
 (def ^:private main-ns
   "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
@@ -177,3 +191,163 @@
            (.write zip (.getBytes ^String (get files path) "UTF-8"))
            (.closeEntry zip)))
        (.toByteArray out))))
+
+;; ── reading one back ────────────────────────────────────────────────────────
+;;
+;; Writing got to choose one representation for everything. Reading meets all
+;; of them, because a .xlsx from Excel is not the .xlsx this namespace
+;; produces: its strings live in a shared table, its numbers have no `t` at
+;; all, and its formulas carry the value Excel last calculated.
+
+(defn column-number
+  "`A` → 1, `AA` → 27. The inverse of `column-name`, and the same borrowing
+  in the other direction."
+  [letters]
+  (reduce (fn [n ch] (+ (* 26 n) (inc (- (int ch) (int \A)))))
+          0
+          (str/upper-case (str letters))))
+
+(defn parse-ref
+  "`B12` → `[12 2]`. Nil for anything that is not a cell reference, so a
+  malformed one is dropped rather than becoming cell `[0 0]`."
+  [ref]
+  (when-let [[_ letters digits] (re-matches #"([A-Za-z]+)(\d+)" (str ref))]
+    [#?(:clj (Long/parseLong digits) :cljs (js/parseInt digits 10))
+     (column-number letters)]))
+
+(defn- all-text
+  "Every `<t>` under `el`, concatenated.
+
+  A shared string can be a single `<t>` or a run of `<r><t>` fragments that
+  differ only in formatting; a reader that took the first would silently
+  truncate every styled string to its first run."
+  [el]
+  (apply str (map xml/el-text (xml/find-all el :t))))
+
+(defn shared-strings
+  "The string table, or an empty vector when the package has none.
+
+  `xlsx-files` never writes one — inline strings need no table — so a
+  package produced here reads back through the same code path as one from
+  Excel, with the table simply empty."
+  [files]
+  (if-let [xml-str (get files "xl/sharedStrings.xml")]
+    (mapv all-text (xml/find-all (xml/parse xml-str) :si))
+    []))
+
+(defn- cell-value
+  "One `<c>` as a cell map, or nil when it holds nothing.
+
+  Four shapes, and the `t` attribute names three of them:
+
+    t=\"s\"          `<v>` is an index into the shared string table
+    t=\"inlineStr\"  `<is><t>` is the text
+    t=\"str\"        `<v>` is a formula's cached string result
+    absent          `<v>` is a number, written as its literal text
+
+  The number is kept as text on purpose. This model has no number type —
+  `sheets.csv` reads every field as a string for a stated reason — and
+  turning `1200` into a long here would be that guess arriving from the
+  other side of the same document."
+  [cell strings]
+  (let [t (xml/el-attr cell "t")
+        formula (first (xml/find-all cell :f))
+        v (first (xml/find-all cell :v))
+        text (cond
+               (= t "inlineStr") (all-text cell)
+               (= t "s") (let [i (some-> v xml/el-text str/trim)]
+                           (get strings
+                                #?(:clj (try (Long/parseLong i) (catch Exception _ -1))
+                                   :cljs (js/parseInt i 10))))
+               :else (some-> v xml/el-text))]
+    (cond
+      ;; A formula wins over its cached value: the formula is what the
+      ;; document says and the value is what Excel last thought. Keeping the
+      ;; value instead would turn a spreadsheet into a printout of one.
+      formula {:sheets/formula (xml/el-text formula)}
+      (not (str/blank? (str text))) {:sheets/value (str text)}
+      :else nil)))
+
+(defn sheet->tab
+  "One worksheet part as a tab."
+  ([xml-str id] (sheet->tab xml-str id [] {}))
+  ([xml-str id strings attrs]
+   (let [root (xml/parse xml-str)]
+     (reduce (fn [tab cell]
+               (let [[row col] (parse-ref (xml/el-attr cell "r"))
+                     value (when row (cell-value cell strings))]
+                 (if value
+                   (assoc-in tab [:sheets/cells [row col]] value)
+                   tab)))
+             (model/tab id attrs)
+             (xml/find-all root :c)))))
+
+(defn- sheet-order
+  "Worksheet part paths in the order the workbook declares, resolved through
+  its relationships.
+
+  Not `sheet1, sheet2, …` by name: a workbook may relate rId1 to
+  `worksheets/sheet3.xml`, and the order Excel shows is the order in
+  `<sheets>`, not the order the files happen to be numbered."
+  [files]
+  (let [rels (when-let [x (get files "xl/_rels/workbook.xml.rels")]
+               (into {} (map (juxt #(xml/el-attr % "Id")
+                                   #(xml/el-attr % "Target")))
+                     (xml/find-all (xml/parse x) :Relationship)))
+        sheets (some-> (get files "xl/workbook.xml") xml/parse (xml/find-all :sheet))]
+    (vec
+     (keep (fn [sheet]
+             (let [target (get rels (or (xml/el-attr sheet "r:id")
+                                        (xml/el-attr sheet "id")))
+                   path (when target
+                          (if (str/starts-with? target "/")
+                            (subs target 1)
+                            (str "xl/" target)))]
+               (when (contains? files path)
+                 {:path path :name (xml/el-attr sheet "name")})))
+           sheets))))
+
+(defn workbook-from-files
+  "A workbook from the parts of a .xlsx.
+
+  Tabs are keyed by their sheet name, which is what a reader sees and what
+  `workbook->csv` takes. A workbook whose `<sheets>` cannot be resolved
+  falls back to every worksheet part in `part-sort-key` order, so a package
+  missing its relationships still comes in rather than coming in empty."
+  ([files] (workbook-from-files files "wb"))
+  ([files id]
+   (let [strings (shared-strings files)
+         declared (sheet-order files)
+         sheets (if (seq declared)
+                  declared
+                  (->> (keys files)
+                       (filter #(str/starts-with? % "xl/worksheets/"))
+                       (sort-by ooxml/part-sort-key)
+                       (map-indexed (fn [i path]
+                                      {:path path :name (str "Sheet" (inc i))}))))]
+     (reduce (fn [wb {:keys [path name]}]
+               (model/add-tab wb (sheet->tab (get files path) name strings
+                                             {:sheets/title name})))
+             (model/workbook id)
+             sheets))))
+
+#?(:clj
+   (defn xlsx-entries
+     "Every part of a .xlsx byte array, as path → text."
+     [^bytes bytes]
+     (with-open [zip (ZipInputStream. (ByteArrayInputStream. bytes))]
+       (loop [acc {}]
+         (if-let [entry (.getNextEntry zip)]
+           (let [out (ByteArrayOutputStream.)
+                 buf (byte-array 8192)]
+             (loop []
+               (let [n (.read zip buf)]
+                 (when (pos? n) (.write out buf 0 n) (recur))))
+             (recur (assoc acc (.getName entry) (String. (.toByteArray out) "UTF-8"))))
+           acc)))))
+
+#?(:clj
+   (defn workbook-from-bytes
+     "A workbook from .xlsx bytes."
+     ([^bytes bytes] (workbook-from-bytes bytes "wb"))
+     ([^bytes bytes id] (workbook-from-files (xlsx-entries bytes) id))))

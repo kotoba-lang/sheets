@@ -14,7 +14,12 @@
         ;; `xl/worksheets/sheetN.xml`. Zero runtime deps of its own.
         io.github.kotoba-lang/ooxml
         {:git/url "https://github.com/kotoba-lang/ooxml.git"
-         :git/sha "d4132a077c1c3797d6300a6a8a6f9c6952e27021"}}
+         :git/sha "d4132a077c1c3797d6300a6a8a6f9c6952e27021"}
+        ;; A pure .cljc XML parser producing hiccup. Reading a .xlsx needs
+        ;; one; writing did not.
+        io.github.kotoba-lang/xml
+        {:git/url "https://github.com/kotoba-lang/xml.git"
+         :git/sha "2e467cba6c587e0bad9c5dd0cbd456e43a348470"}}
  :aliases
  {;; Bounded Kotoba profile (sheets.bounded-cells). :replace-paths/:replace-deps
   ;; so the compiler's classpath scan doesn't inherit the base :deps.

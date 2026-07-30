@@ -69,8 +69,28 @@ with the cells indexing it.
 A formula writes `<f>` and no cached `<v>`: there is no evaluator here, so
 Excel recalculates on open.
 
-Export only so far. Reading a .xlsx needs an XML parser and the
-sharedStrings/styles/date-serial handling that writing gets to skip.
+```clojure
+(xlsx/workbook-from-bytes b)   ; a .xlsx back into a workbook, JVM
+(xlsx/workbook-from-files m)   ; from the parts, anywhere
+```
+
+Reading meets more shapes than writing chose. A .xlsx from Excel keeps its
+strings in a shared table, writes numbers with no `t` at all, and carries
+the value it last calculated next to each formula. All of those come in, and
+**the formula wins over its cached value** — the formula is what the
+document says and the value is what Excel last thought, so keeping the value
+would turn a spreadsheet into a printout of one.
+
+Sheets come in the order `<sheets>` declares, resolved through the
+workbook's relationships, because a workbook may relate rId1 to
+`sheet3.xml`. A package whose relationships are missing still comes in, by
+part order — an import that silently produced an empty workbook would look
+like a working import of an empty file.
+
+**Styles are not read, so neither are dates.** Excel stores a date as a
+serial number whose format is what makes it a date, so one arrives here as
+`45000`. Reading styles is what this needs next; an obvious number is better
+than a wrong date.
 
 Rehydrate before validating. `sheets.validate` reads namespaced keys, and on
 a projected payload it finds none — reporting no problems rather than
