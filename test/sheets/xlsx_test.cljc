@@ -116,3 +116,96 @@
        (is (= 11 (count sheets)))
        (is (= ["xl/worksheets/sheet1.xml" "xl/worksheets/sheet2.xml"]
               (take 2 (sort-by ooxml/part-sort-key sheets)))))))
+
+;; ── reading one back ────────────────────────────────────────────────────────
+
+(deftest column-numbers-invert-column-names
+  (doseq [n [1 26 27 28 52 53 702 703 16384]]
+    (is (= n (xlsx/column-number (xlsx/column-name n))) (str "column " n)))
+  (is (= [12 2] (xlsx/parse-ref "B12")))
+  (is (= [1 27] (xlsx/parse-ref "AA1")))
+  ;; Nil rather than [0 0], so a malformed reference is dropped instead of
+  ;; landing somewhere.
+  (is (nil? (xlsx/parse-ref "12B")))
+  (is (nil? (xlsx/parse-ref ""))))
+
+(deftest what-this-writes-it-can-read
+  (let [back (xlsx/workbook-from-files (xlsx/xlsx-files (plan)) "wb")
+        tab (m/tab-by-id back "Plan")]
+    (is (= ["Plan"] (keys (:sheets/tabs back))))
+    (is (= {:sheets/value "Quarter"} (m/get-cell tab 1 1)))
+    (is (= {:sheets/value "1200"} (m/get-cell tab 2 2)))
+    (is (= {:sheets/formula "SUM(B2:B2)"} (m/get-cell tab 3 2)))))
+
+(def ^:private excel-style
+  "The shapes Excel actually writes, none of which this namespace produces:
+  a shared string table, a bare number with no `t`, and a formula carrying
+  the value Excel last calculated."
+  {"xl/workbook.xml"
+   (str "<workbook xmlns:r=\"x\"><sheets>"
+        "<sheet name=\"予算\" sheetId=\"1\" r:id=\"rId1\"/>"
+        "</sheets></workbook>")
+   "xl/_rels/workbook.xml.rels"
+   "<Relationships><Relationship Id=\"rId1\" Target=\"worksheets/sheet1.xml\"/></Relationships>"
+   "xl/sharedStrings.xml"
+   (str "<sst><si><t>四半期</t></si>"
+        ;; A run-split string: a reader that took the first <t> would
+        ;; silently truncate it to "売".
+        "<si><r><t>売</t></r><r><t>上</t></r></si></sst>")
+   "xl/worksheets/sheet1.xml"
+   (str "<worksheet><sheetData><row r=\"1\">"
+        "<c r=\"A1\" t=\"s\"><v>0</v></c>"
+        "<c r=\"B1\" t=\"s\"><v>1</v></c></row>"
+        "<row r=\"2\"><c r=\"A2\"><v>1200</v></c>"
+        "<c r=\"B2\"><f>A2*2</f><v>2400</v></c>"
+        "<c r=\"C2\" t=\"str\"><f>UPPER(\"x\")</f><v>X</v></c></row>"
+        "</sheetData></worksheet>")})
+
+(deftest a-workbook-from-excel-reads
+  (let [wb (xlsx/workbook-from-files excel-style "wb")
+        tab (m/tab-by-id wb "予算")]
+    (is (= ["予算"] (keys (:sheets/tabs wb))) "the tab is keyed by the name a reader sees")
+    (is (= {:sheets/value "四半期"} (m/get-cell tab 1 1)) "a shared string")
+    (is (= {:sheets/value "売上"} (m/get-cell tab 1 2)) "and one split across runs")
+    ;; Kept as text. This model has no number type, and turning 1200 into a
+    ;; long here is the guess arriving from the other side of the document.
+    (is (= {:sheets/value "1200"} (m/get-cell tab 2 1)))
+    ;; The formula wins over its cached value: the formula is what the
+    ;; document says, the value is what Excel last thought.
+    (is (= {:sheets/formula "A2*2"} (m/get-cell tab 2 2)))
+    (is (= {:sheets/formula "UPPER(\"x\")"} (m/get-cell tab 2 3)))))
+
+(deftest sheets-come-in-the-order-the-workbook-declares
+  ;; Not by file number: a workbook may relate rId1 to sheet3.xml, and what
+  ;; Excel shows is the order in <sheets>.
+  (let [files {"xl/workbook.xml"
+               (str "<workbook xmlns:r=\"x\"><sheets>"
+                    "<sheet name=\"Second\" r:id=\"rId1\"/>"
+                    "<sheet name=\"First\" r:id=\"rId2\"/></sheets></workbook>")
+               "xl/_rels/workbook.xml.rels"
+               (str "<Relationships>"
+                    "<Relationship Id=\"rId1\" Target=\"worksheets/sheet3.xml\"/>"
+                    "<Relationship Id=\"rId2\" Target=\"worksheets/sheet1.xml\"/>"
+                    "</Relationships>")
+               "xl/worksheets/sheet1.xml"
+               "<worksheet><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>one</t></is></c></row></sheetData></worksheet>"
+               "xl/worksheets/sheet3.xml"
+               "<worksheet><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>three</t></is></c></row></sheetData></worksheet>"}
+        wb (xlsx/workbook-from-files files "wb")]
+    (is (= {:sheets/value "three"} (m/get-cell (m/tab-by-id wb "Second") 1 1)))
+    (is (= {:sheets/value "one"} (m/get-cell (m/tab-by-id wb "First") 1 1)))))
+
+(deftest a-package-with-no-relationships-still-comes-in
+  ;; Rather than coming in empty, which is the failure that looks like a
+  ;; working import of an empty file.
+  (let [wb (xlsx/workbook-from-files
+            {"xl/worksheets/sheet1.xml"
+             "<worksheet><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>hi</t></is></c></row></sheetData></worksheet>"}
+            "wb")]
+    (is (= {:sheets/value "hi"} (m/get-cell (m/tab-by-id wb "Sheet1") 1 1)))))
+
+#?(:clj
+   (deftest the-bytes-round-trip
+     (let [back (xlsx/workbook-from-bytes (xlsx/xlsx-bytes (plan)) "wb")]
+       (is (= {:sheets/value "Q1"} (m/get-cell (m/tab-by-id back "Plan") 2 1)))
+       (is (= {:sheets/formula "SUM(B2:B2)"} (m/get-cell (m/tab-by-id back "Plan") 3 2))))))
