@@ -54,14 +54,22 @@
         (contains? (set "0123456789") (nth s j)) (recur (inc j) seen-dot?)
         :else [(subs s i j) j]))))
 
+(def ^:private stops
+  "The characters a word ends at: whitespace, operators, punctuation, quote.
+
+  Defined as what stops a word rather than as what a word contains, because
+  a named range here is as likely to be 売上 as Sales. An allowlist of ASCII
+  letters would make every non-English name unspellable, which is a strange
+  thing for this Drive to decide."
+  (set " \t\n+-*/^%(),:<>=&\""))
+
 (defn- word-token
-  "A run of letters, digits, `$` and `_` — a cell reference or a function
-  name, which cannot be told apart until something follows them."
+  "A run of anything that is not a stop — a cell reference, a function name,
+  or a named range, which cannot be told apart until something follows."
   [s i]
-  (let [n (count s)
-        word? (set "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_")]
+  (let [n (count s)]
     (loop [j i]
-      (if (and (< j n) (contains? word? (nth s j)))
+      (if (and (< j n) (not (contains? stops (nth s j))))
         (recur (inc j))
         [(subs s i j) j]))))
 
@@ -169,8 +177,11 @@
         (= :colon (first (first (rest ts))))
         [[:range text (second (first (rest (rest ts))))] (rest (rest (rest ts)))]
 
-        (parse-ref text) [[:ref text] (rest ts)]
-        :else [[:error "#NAME?"] (rest ts)])
+        ;; A cell reference or a named range — and which it is cannot be
+        ;; decided here, because names live on the workbook and this only
+        ;; has the text. `eval-node` resolves it and answers `#NAME?` if it
+        ;; is neither.
+        :else [[:ref text] (rest ts)])
 
       :else [[:error "#NAME?"] (rest ts)])))
 
@@ -359,25 +370,38 @@
         "IF" "#NAME?"
         "#NAME?"))))
 
-(defn- eval-node [node tab seen]
+(defn- eval-node [node tab seen opts]
   (let [[kind a b] node]
     (case kind
       :num (or (as-number a) "#VALUE!")
       :str a
       :error a
-      :neg (let [v (eval-node a tab seen)]
+      :neg (let [v (eval-node a tab seen opts)]
              (cond (error? v) v
                    (as-number v) (- (as-number v))
                    :else "#VALUE!"))
       :ref (let [[row col] (parse-ref a)]
-             (if row (value-at tab row col seen) "#REF!"))
+             (cond
+               row (value-at tab row col seen opts)
+               ;; A word that is not a cell reference may be a named range —
+               ;; `=SUM(売上)`. Resolved to the range it stands for and then
+               ;; evaluated as one, so a name behaves exactly like the
+               ;; addresses it replaces rather than like a second kind of
+               ;; thing.
+               (get (:names opts) (str a))
+               (eval-node (let [{:keys [from to]} (get (:names opts) (str a))]
+                            [:range from to])
+                          tab seen opts)
+               ;; Neither an address nor a name anybody defined. Excel's
+               ;; answer for a word it does not know.
+               :else "#NAME?"))
       :range (let [from (parse-ref a) to (parse-ref b)]
                (if (and from to)
                  (vec (for [row (range (min (first from) (first to))
                                        (inc (max (first from) (first to))))
                             col (range (min (second from) (second to))
                                        (inc (max (second from) (second to))))]
-                        (value-at tab row col seen)))
+                        (value-at tab row col seen opts)))
                  "#REF!"))
       ;; `IF` chooses before it computes. Everything else takes evaluated
       ;; arguments, and evaluating both branches of an IF defeats the thing
@@ -386,15 +410,15 @@
       ;; formula #DIV/0! — the error the guard exists to avoid. Measured
       ;; before it was fixed.
       :call (if (= "IF" a)
-              (let [test (eval-node (first b) tab seen)]
+              (let [test (eval-node (first b) tab seen opts)]
                 (cond
                   (error? test) test
-                  (truthy? test) (if (> (count b) 1) (eval-node (nth b 1) tab seen) "")
-                  :else (if (> (count b) 2) (eval-node (nth b 2) tab seen) "")))
-              (apply-fn a (mapv #(eval-node % tab seen) b)))
+                  (truthy? test) (if (> (count b) 1) (eval-node (nth b 1) tab seen opts) "")
+                  :else (if (> (count b) 2) (eval-node (nth b 2) tab seen opts) "")))
+              (apply-fn a (mapv #(eval-node % tab seen opts) b)))
       :op (let [op a
-                x (eval-node b tab seen)
-                y (eval-node (nth node 3) tab seen)]
+                x (eval-node b tab seen opts)
+                y (eval-node (nth node 3) tab seen opts)]
             (cond
               (error? x) x
               (error? y) y
@@ -420,14 +444,15 @@
   chain is `#CIRCULAR!` — reported rather than recursed into, because the
   alternative is a stack overflow, and a spreadsheet that crashes on a
   self-reference is worse than one that says so."
-  ([tab row col] (value-at tab row col #{}))
-  ([tab row col seen]
+  ([tab row col] (value-at tab row col #{} {}))
+  ([tab row col seen] (value-at tab row col seen {}))
+  ([tab row col seen opts]
    (let [key [row col]
          cell (get-in tab [:sheets/cells key])]
      (cond
        (contains? seen key) "#CIRCULAR!"
        (contains? cell :sheets/formula)
-       (let [v (eval-node (parse (:sheets/formula cell)) tab (conj seen key))]
+       (let [v (eval-node (parse (:sheets/formula cell)) tab (conj seen key) opts)]
          (cond (error? v) v
                (number? v) (format-number v)
                (boolean? v) (if v "TRUE" "FALSE")
@@ -435,13 +460,42 @@
                :else (str v)))
        :else (or (:sheets/value cell) "")))))
 
+(defn names-of
+  "A workbook's named ranges as `{name {:from \"A1\" :to \"B9\"}}`, for the tab
+  `tab-id`.
+
+  A name belongs to the workbook and a range belongs to a tab, so a name
+  pointing at another tab is not resolvable from here — it is dropped rather
+  than resolved against the wrong sheet, which would be an answer computed
+  from the wrong numbers."
+  [workbook tab-id]
+  (into {}
+        (keep (fn [[name range]]
+                (when (= tab-id (:sheets/tab range))
+                  (let [[from to] (str/split (str (:sheets/range range)) #":" 2)]
+                    (when (and from to) [(str name) {:from from :to to}])))))
+        (:sheets/named-ranges workbook)))
+
 (defn values
   "Every cell of `tab` as what it comes to, keyed the same way the cells are.
 
   Computed on demand and never written back: a stored result is a second
   copy of something derived, stale the moment an input changes and
   indistinguishable afterwards from a value somebody typed."
-  [tab]
+  ([tab] (values tab {}))
+  ([tab opts]
+   (into {}
+         (map (fn [[key _]] [key (value-at tab (first key) (second key) #{} opts)]))
+         (:sheets/cells tab))))
+
+(defn workbook-values
+  "Every cell of every tab, with the workbook's named ranges resolvable.
+
+  The arity to use from an application: `values` on a bare tab cannot see
+  names, because names live on the workbook and a tab does not know which
+  workbook it is in."
+  [workbook]
   (into {}
-        (map (fn [[key _]] [key (value-at tab (first key) (second key))]))
-        (:sheets/cells tab)))
+        (map (fn [[tab-id tab]]
+               [tab-id (values tab {:names (names-of workbook tab-id)})]))
+        (:sheets/tabs workbook)))

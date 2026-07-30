@@ -146,6 +146,22 @@ Excel spells "test one column, total another".
 
 Not implemented: everything else, which is `#NAME?` rather than a crash.
 
+**Named ranges resolve.** `=SUM(売上)` where 売上 is `A1:A3` on this tab.
+Use `workbook-values`, not `values`: a name belongs to the workbook and a
+tab does not know which workbook it is in. A name whose range is on another
+tab is *not* resolved — answering it against the wrong sheet would be a
+number computed from the wrong cells, which is worse than `#NAME?`.
+
+A word the tokeniser meets ends at an operator, punctuation or whitespace,
+rather than being matched against a list of ASCII letters. A named range
+here is as likely to be 売上 as Sales, and an allowlist would make every
+non-English name unspellable.
+
+`sheets.xlsx` writes them now, as `<definedNames>` after `</sheets>` — the
+schema fixes that order and Excel refuses a file that gets it wrong. Only a
+name pointing at a tab the workbook does not have is still dropped, and
+`unexpressed` reports exactly those rather than all of them.
+
 ## Where a column letter lives
 
 `sheets.model/column-name` and `column-number`. They were in `sheets.xlsx`,
