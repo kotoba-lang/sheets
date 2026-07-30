@@ -141,6 +141,49 @@
   [workbook tab-id]
   (some-> (model/tab-by-id workbook tab-id) tab->csv))
 
+(defn unexpressed
+  "What `workbook->csv` will drop from this workbook, one entry per thing.
+
+  Shaped like `sheets.validate/problems`, the same as
+  `sheets.xlsx/unexpressed`. All `:info`: a CSV not carrying something is a
+  property of CSV.
+
+  The first entry is the one that surprises people. **A CSV is one table**,
+  so every other tab is left behind — and unlike the losses below, that one
+  is most of the document.
+
+  A formula goes out as its own text, `=SUM(B2:B9)`, rather than as what it
+  comes to. Excel re-evaluates it on open, which is why it is written that
+  way; a reader that is not a spreadsheet gets the formula. Both are
+  defensible and only one can be written, so the choice is reported rather
+  than argued."
+  [workbook tab-id]
+  (let [entry (fn [code id msg]
+                {:sheets/severity :info :sheets/code code :sheets/id id
+                 :sheets/msg msg})
+        tab (model/tab-by-id workbook tab-id)
+        others (remove #(= tab-id (key %)) (:sheets/tabs workbook))]
+    (vec
+     (concat
+      (when (seq others)
+        [(entry :csv/other-tabs-dropped tab-id
+                (str "CSV は1つの表なので、他の " (count others)
+                     " タブは書き出されません。"))])
+      (when (some #(contains? % :sheets/formula) (vals (:sheets/cells tab)))
+        [(entry :csv/formulas-as-text tab-id
+                "数式は計算結果ではなく =SUM(...) のまま書き出されます。")])
+      (when (some :sheets/style (vals (:sheets/cells tab)))
+        [(entry :csv/cell-styles-dropped tab-id
+                "セルの書式（色・太字・表示形式）は書き出されません。")])
+      (when (seq (:sheets/named-ranges workbook))
+        [(entry :csv/named-ranges-dropped tab-id
+                (str (count (:sheets/named-ranges workbook))
+                     " 件の名前付き範囲は書き出されません。"))])
+      (when (seq (:sheets/charts workbook))
+        [(entry :csv/charts-dropped tab-id
+                (str (count (:sheets/charts workbook))
+                     " 件のグラフは書き出されません。"))])))))
+
 (defn import-csv
   "`workbook` with `text` added as a tab.
 

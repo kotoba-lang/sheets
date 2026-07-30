@@ -1,5 +1,6 @@
 (ns sheets.csv-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [sheets.csv :as csv]
             [sheets.model :as m]
             [sheets.validate :as v]))
@@ -98,3 +99,53 @@
   (let [wb (m/add-tab (m/workbook "wb") (plan))]
     (is (= (csv/tab->csv (plan)) (csv/workbook->csv wb "plan")))
     (is (nil? (csv/workbook->csv wb "no-such-tab")))))
+
+;; ── what a CSV cannot carry ─────────────────────────────────────────────────
+
+(deftest a-single-tab-workbook-with-plain-cells-loses-nothing
+  (let [wb (m/add-tab (m/workbook "wb")
+                      (-> (m/tab "t" {:sheets/title "t"})
+                          (m/put-cell 1 1 "四半期")))]
+    (is (= [] (csv/unexpressed wb "t")))))
+
+(deftest the-other-tabs-are-the-loss-that-matters
+  ;; A CSV is one table, and unlike the rest of the list this one is most of
+  ;; the document.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (m/tab "上期" {:sheets/title "上期"}))
+               (m/add-tab (m/tab "下期" {:sheets/title "下期"}))
+               (m/add-tab (m/tab "通年" {:sheets/title "通年"})))
+        [entry] (csv/unexpressed wb "上期")]
+    (is (= :csv/other-tabs-dropped (:sheets/code entry)))
+    (is (str/includes? (:sheets/msg entry) "2 タブ"))
+    (is (= :info (:sheets/severity entry)))))
+
+(deftest a-formula-leaves-as-its-own-text
+  ;; Excel re-evaluates it on open, which is why it is written that way; a
+  ;; reader that is not a spreadsheet gets the formula. Both are defensible
+  ;; and only one can be written, so it is reported rather than argued.
+  (let [wb (m/add-tab (m/workbook "wb")
+                      (-> (m/tab "t" {:sheets/title "t"})
+                          (m/put-cell 1 1 "1200")
+                          (m/put-formula 2 1 "SUM(A1:A1)")))]
+    (is (= [:csv/formulas-as-text] (mapv :sheets/code (csv/unexpressed wb "t"))))
+    ;; And it really does — the report matches the writer.
+    (is (str/includes? (csv/workbook->csv wb "t") "=SUM(A1:A1)"))))
+
+(deftest styles-names-and-charts-are-named-too
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (-> (m/tab "t" {:sheets/title "t"})
+                              (m/put-cell 1 1 "a")
+                              (m/put-cell-style 1 1 {:bold true})))
+               (m/add-named-range "総計" {:sheets/tab "t" :sheets/range "A1:A1"})
+               (m/add-chart {:sheets/id "c1" :sheets/data-range "A1:A1"}))
+        codes (set (map :sheets/code (csv/unexpressed wb "t")))]
+    (is (contains? codes :csv/cell-styles-dropped))
+    (is (contains? codes :csv/named-ranges-dropped))
+    (is (contains? codes :csv/charts-dropped))))
+
+(deftest unexpressed-does-not-throw-on-a-half-built-workbook
+  (doseq [wb [{} {:sheets/tabs nil} {:sheets/tabs {"t" {}}}
+              {:sheets/tabs {"t" {:sheets/cells nil}}}]]
+    (is (vector? (csv/unexpressed wb "t")) (pr-str wb))
+    (is (vector? (csv/unexpressed wb "missing")) (pr-str wb))))
