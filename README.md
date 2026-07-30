@@ -182,6 +182,41 @@ schema fixes that order and Excel refuses a file that gets it wrong. Only a
 name pointing at a tab the workbook does not have is still dropped, and
 `unexpressed` reports exactly those rather than all of them.
 
+## A chart, drawn
+
+`add-chart` was in the model from the start and nothing could draw one or
+write one — `sheets.xlsx/unexpressed` reported charts as dropped and that
+was the whole of their existence.
+
+```clojure
+(chart/svg tab {:sheets/id "c" :sheets/data-range "A1:B3" :sheets/chart-type :bar})
+(chart/charts-of workbook "売上")   ; every chart over that tab, with its SVG
+```
+
+SVG, and in this library rather than in an application: a string can be
+tested without a browser, rendered server-side, and put in a page by
+anything that can put a string in a page. An application drawing its own
+would be the second implementation of an axis.
+
+**It plots what a formula comes to**, through `sheets.formula`, because a
+chart over a column of `=SUM(…)` should plot the totals and reading
+`:sheets/value` would plot nothing at all.
+
+**The first column becomes labels when it holds no numbers.** A range
+selected by dragging across a table almost always includes the row headings,
+and plotting 四半期 as zero is worse than using it to name the bar.
+
+**A range with no numbers draws nothing** — nil, not an empty frame. Axes
+around no data read as *there is no data here*, which is the wrong answer
+when the range is simply wrong; a caller that gets nil can say which.
+`charts-of` still lists such a chart, with a nil `:svg`, because a chart
+somebody defined and cannot see is a thing to say rather than to hide.
+
+The axis top is a round number — one, two or five times a power of ten —
+because a bar touching the frame reads as clipped and a fixed percentage
+produces labels like 1,127. `.xlsx` still does not carry a chart, and
+`unexpressed` still says so.
+
 ## Cell styles
 
 Weight, slant, underline, horizontal alignment and a number format are

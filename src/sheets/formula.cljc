@@ -228,9 +228,13 @@
 
 ;; ── computing ───────────────────────────────────────────────────────────────
 
-(defn- as-number
+(defn as-number
   "Text as a number, or nil. The one place a string becomes one, and only
-  because something asked for a number."
+  because something asked for a number.
+
+  Public because a chart has to ask the same question of the same values,
+  and a second answer to \"is this a number\" is how a total and a bar come
+  to disagree."
   [x]
   (cond
     (number? x) x
