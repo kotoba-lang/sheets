@@ -78,18 +78,129 @@
 (defn cell-ref [row col]
   (str (column-name col) row))
 
-(defn- cell-xml [row col cell]
-  (let [ref (cell-ref row col)]
-    (cond
-      (contains? cell :sheets/formula)
-      (str "<c r=\"" ref "\"><f>" (ooxml/xml-esc (:sheets/formula cell)) "</f></c>")
+;; ── cell styles ─────────────────────────────────────────────────────────────
+;;
+;; A style is written as an entry in `cellXfs` and an `s` index on the cell.
+;; That is two levels of indirection — cell → xf → font/numFmt — and it is
+;; what made styles the largest of the losses `unexpressed` reported: a
+;; writer that emits a `<font b="1"/>` and nothing else produces a file Excel
+;; opens with no bold in it, because nothing pointed at the font.
+;;
+;; The vocabulary is closed on purpose. `:sheets/style` is an open map in the
+;; model and this writes the part of it a spreadsheet has: weight, slant,
+;; underline, horizontal alignment, and a number format. Anything else is
+;; still reported as dropped rather than silently ignored.
 
-      (some? (:sheets/value cell))
-      (str "<c r=\"" ref "\" t=\"inlineStr\"><is><t xml:space=\"preserve\">"
-           (ooxml/xml-esc (:sheets/value cell))
-           "</t></is></c>")
+(def style-keys
+  "The parts of a `:sheets/style` this writer can express."
+  [:bold :italic :underline :align :number-format])
 
-      :else nil)))
+(defn- style-of
+  "The expressible part of a cell's style, or nil when there is none.
+
+  Reduced to just these keys so that two cells differing only in something
+  this cannot write share one `cellXfs` entry rather than two identical
+  ones."
+  [cell]
+  (let [style (select-keys (:sheets/style cell) style-keys)]
+    (when (seq (remove (comp nil? val) style)) style)))
+
+(defn- distinct-styles
+  "Every distinct expressible style in the workbook, in a stable order.
+
+  Sorted by their printed form rather than left in hash order: the index a
+  cell carries is a position in this vector, so an unstable order writes a
+  different file for the same workbook on every run."
+  [tabs]
+  (->> tabs
+       (mapcat #(vals (:sheets/cells %)))
+       (keep style-of)
+       distinct
+       (sort-by pr-str)
+       vec))
+
+(def ^:private first-custom-format
+  "Custom `numFmtId`s start at 164; below that the ids are the spec's own."
+  164)
+
+(defn- styles-xml
+  "`xl/styles.xml` — the fonts, the number formats, and the `cellXfs` that
+  point at them.
+
+  `cellXfs` position 0 is the default and every workbook needs it, because a
+  cell with no `s` attribute means position 0 and a file whose `cellXfs` is
+  empty is one Excel refuses."
+  [styles]
+  (let [formats (->> styles (keep :number-format) distinct vec)
+        format-id (into {} (map-indexed (fn [i f] [f (+ first-custom-format i)]) formats))]
+    (str "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+         "<styleSheet xmlns=\"" main-ns "\">"
+         (when (seq formats)
+           (str "<numFmts count=\"" (count formats) "\">"
+                (apply str (for [f formats]
+                             (str "<numFmt numFmtId=\"" (format-id f) "\" formatCode=\""
+                                  (ooxml/xml-esc (str f)) "\"/>")))
+                "</numFmts>"))
+         ;; Font 0 is the default; one font per style after it, even when two
+         ;; styles share a font — an index per style keeps `cellXfs`
+         ;; position and font index the same number, and the duplication
+         ;; costs bytes rather than correctness.
+         "<fonts count=\"" (inc (count styles)) "\"><font/>"
+         (apply str (for [style styles]
+                      (str "<font>"
+                           (when (:bold style) "<b/>")
+                           (when (:italic style) "<i/>")
+                           (when (:underline style) "<u/>")
+                           "</font>")))
+         "</fonts>"
+         "<fills count=\"1\"><fill><patternFill patternType=\"none\"/></fill></fills>"
+         "<borders count=\"1\"><border/></borders>"
+         "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\"/></cellStyleXfs>"
+         "<cellXfs count=\"" (inc (count styles)) "\">"
+         "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
+         (apply str
+                (map-indexed
+                 (fn [i style]
+                   (let [fmt (get format-id (:number-format style) 0)]
+                     (str "<xf numFmtId=\"" fmt "\" fontId=\"" (inc i)
+                          "\" fillId=\"0\" borderId=\"0\" xfId=\"0\""
+                          (when (:number-format style) " applyNumberFormat=\"1\"")
+                          (when (or (:bold style) (:italic style) (:underline style))
+                            " applyFont=\"1\"")
+                          (if (:align style)
+                            (str " applyAlignment=\"1\"><alignment horizontal=\""
+                                 (ooxml/xml-esc (name (:align style))) "\"/></xf>")
+                            "/>"))))
+                 styles))
+         "</cellXfs>"
+         "<cellStyles count=\"1\">"
+         "<cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
+         "</styleSheet>")))
+
+(defn- cell-xml
+  "One `<c>`.
+
+  `style-index` maps a cell's expressible style to its position in
+  `cellXfs`; a cell with none gets no `s` attribute, which means position 0
+  and is the default."
+  ([row col cell] (cell-xml row col cell {}))
+  ([row col cell style-index]
+   (let [ref (cell-ref row col)
+         s (when-let [i (get style-index (style-of cell))] (str " s=\"" i "\""))]
+     (cond
+       (contains? cell :sheets/formula)
+       (str "<c r=\"" ref "\"" s "><f>" (ooxml/xml-esc (:sheets/formula cell)) "</f></c>")
+
+       (some? (:sheets/value cell))
+       (str "<c r=\"" ref "\"" s " t=\"inlineStr\"><is><t xml:space=\"preserve\">"
+            (ooxml/xml-esc (:sheets/value cell))
+            "</t></is></c>")
+
+       ;; A cell with a style and nothing in it still has to be written, or
+       ;; a formatted empty column comes back unformatted.
+       s (str "<c r=\"" ref "\"" s "/>")
+
+       :else nil))))
 
 (defn sheet-xml
   "One worksheet part.
@@ -97,17 +208,19 @@
   Rows and cells are emitted in order and only where there is something to
   say: a sparse tab stays sparse, because a row of empty `<c>` elements is
   bytes that mean the same as their absence."
-  [tab]
-  (let [[rows cols] (csv/tab-bounds tab)]
+  ([tab] (sheet-xml tab {}))
+  ([tab style-index]
+   (let [[rows cols] (csv/tab-bounds tab)]
     (str "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
          "<worksheet xmlns=\"" main-ns "\"><sheetData>"
          (apply str
                 (for [row (range 1 (inc rows))
-                      :let [cells (str/join (keep #(cell-xml row % (model/get-cell tab row %))
+                      :let [cells (str/join (keep #(cell-xml row % (model/get-cell tab row %)
+                                                             style-index)
                                                   (range 1 (inc cols))))]
                       :when (seq cells)]
                   (str "<row r=\"" row "\">" cells "</row>")))
-         "</sheetData></worksheet>")))
+         "</sheetData></worksheet>"))))
 
 (defn- ordered-tabs
   "The workbook's tabs in a stable order.
@@ -187,7 +300,10 @@
   [workbook]
   (let [tabs (ordered-tabs workbook)
         tabs (if (seq tabs) tabs [(model/tab "Sheet1")])
-        sheet-path (fn [n] (str "xl/worksheets/sheet" n ".xml"))]
+        sheet-path (fn [n] (str "xl/worksheets/sheet" n ".xml"))
+        styles (distinct-styles tabs)
+        ;; Position 0 in `cellXfs` is the default, so the first style is 1.
+        style-index (into {} (map-indexed (fn [i st] [st (inc i)]) styles))]
     (into
      {"[Content_Types].xml"
       (ooxml/content-types-xml
@@ -196,7 +312,11 @@
                 (ooxml/override-content-type
                  "/xl/workbook.xml"
                  (str "application/vnd.openxmlformats-officedocument."
-                      "spreadsheetml.sheet.main+xml"))]
+                      "spreadsheetml.sheet.main+xml"))
+                (ooxml/override-content-type
+                 "/xl/styles.xml"
+                 (str "application/vnd.openxmlformats-officedocument."
+                      "spreadsheetml.styles+xml"))]
                (map-indexed (fn [index _]
                               (ooxml/override-content-type
                                (str "/" (sheet-path (inc index)))
@@ -212,15 +332,28 @@
 
       "xl/workbook.xml" (workbook-xml workbook tabs)
 
+      ;; Always written, even with no styles. A cell with no `s` means
+      ;; `cellXfs` position 0, and a workbook whose styles part is missing is
+      ;; one Excel opens with a repair prompt.
+      "xl/styles.xml" (styles-xml styles)
+
       "xl/_rels/workbook.xml.rels"
       (ooxml/relationships-xml
-       (map-indexed (fn [index _]
-                      (ooxml/relationship
-                       {:id (str "rId" (inc index))
-                        :type (str rels-ns "/worksheet")
-                        :target (str "worksheets/sheet" (inc index) ".xml")}))
-                    tabs))}
-     (map-indexed (fn [index tab] [(sheet-path (inc index)) (sheet-xml tab)]) tabs))))
+       (concat
+        (map-indexed (fn [index _]
+                       (ooxml/relationship
+                        {:id (str "rId" (inc index))
+                         :type (str rels-ns "/worksheet")
+                         :target (str "worksheets/sheet" (inc index) ".xml")}))
+                     tabs)
+        ;; After the worksheets, so the sheet ids the workbook part writes
+        ;; still line up with rId1..rIdN.
+        [(ooxml/relationship {:id (str "rId" (inc (count tabs)))
+                              :type (str rels-ns "/styles")
+                              :target "styles.xml"})]))}
+     (map-indexed (fn [index tab] [(sheet-path (inc index))
+                                   (sheet-xml tab style-index)])
+                  tabs))))
 
 (defn package
   "The parts as an `ooxml/package`, for a caller that wants to look before
@@ -282,10 +415,18 @@
       ;; Once per tab rather than once per cell: the answer is the same for
       ;; every one of them, and a workbook with a styled header row would
       ;; otherwise report a column's worth of identical warnings.
+      ;; Weight, slant, underline, alignment and a number format are
+      ;; written now. What is left is everything else a `:sheets/style` may
+      ;; carry — a colour, a border, a font family — which is reported by
+      ;; naming the keys rather than by claiming the whole style is lost.
       (for [tab tabs
-            :when (some :sheets/style (vals (:sheets/cells tab)))]
-        (entry :xlsx/cell-styles-dropped (:sheets/id tab)
-               "セルの書式（色・太字・表示形式）は書き出されません。"))
+            :let [extra (->> (vals (:sheets/cells tab))
+                             (mapcat #(keys (apply dissoc (:sheets/style %) style-keys)))
+                             distinct sort vec)]
+            :when (seq extra)]
+        (entry :xlsx/cell-style-parts-dropped (:sheets/id tab)
+               (str "セル書式のうち " (str/join "、" (map name extra))
+                    " は書き出されません。")))
       ;; Named ranges are written now, so only the ones that cannot be are
       ;; reported: a name pointing at a tab this workbook does not have
       ;; would become a reference to a sheet that is not there, which is a
@@ -374,8 +515,47 @@
                        (xml/find-all root :numFmt))
           xfs (some-> (first (xml/find-all root :cellXfs)) (xml/find-all :xf))]
       {:formats (mapv #(xml/el-attr % "numFmtId") (or xfs []))
-       :custom custom})
-    {:formats [] :custom {}}))
+       :custom custom
+       ;; What each `cellXfs` entry says about weight, slant and alignment,
+       ;; so a style can be read back and not only recognised as a date.
+       :fonts (mapv #(xml/el-attr % "fontId") (or xfs []))
+       :aligns (mapv #(some-> (first (xml/find-all % :alignment))
+                              (xml/el-attr "horizontal"))
+                     (or xfs []))
+       :weights (mapv (fn [font]
+                        {:bold (boolean (seq (xml/find-all font :b)))
+                         :italic (boolean (seq (xml/find-all font :i)))
+                         :underline (boolean (seq (xml/find-all font :u)))})
+                      (some-> (first (xml/find-all root :fonts))
+                              (xml/find-all :font)))})
+    {:formats [] :custom {} :fonts [] :aligns [] :weights []}))
+
+(defn style-at
+  "The style the `cellXfs` entry at index `s` describes, or nil.
+
+  The inverse of what the writer does, and it has to be: a cell carries a
+  position in `cellXfs`, and reading that position as anything else — a font
+  id, a format id — gives every cell whichever style happens to sit at that
+  number, which is wrong in the way that still looks like formatting."
+  [{:keys [formats custom fonts aligns weights]} s]
+  (when-let [i (parse-int-safe s)]
+    (when (< -1 i (count formats))
+      (let [font-id (parse-int-safe (nth fonts i nil))
+            weight (when font-id (nth weights font-id nil))
+            format-id (nth formats i nil)
+            custom-code (get custom format-id)
+            align (nth aligns i nil)
+            style (cond-> {}
+                    (:bold weight) (assoc :bold true)
+                    (:italic weight) (assoc :italic true)
+                    (:underline weight) (assoc :underline true)
+                    align (assoc :align (keyword align))
+                    ;; Only a custom format comes back. A built-in id is a
+                    ;; number this library has no table for, and inventing a
+                    ;; format code for it would be writing something the
+                    ;; file never said.
+                    custom-code (assoc :number-format custom-code))]
+        (when (seq style) style)))))
 
 (defn date-style?
   "Whether the cell style at index `s` formats a date."
@@ -540,14 +720,21 @@
         ;; string under a date format is still a string, whatever the style
         ;; claims.
         serial (when (and (nil? t) styles (date-style? styles (xml/el-attr cell "s")))
-                 (serial-of text))]
+                 (serial-of text))
+        style (when styles (style-at styles (xml/el-attr cell "s")))]
     (cond
       ;; A formula wins over its cached value: the formula is what the
       ;; document says and the value is what Excel last thought. Keeping the
       ;; value instead would turn a spreadsheet into a printout of one.
-      formula {:sheets/formula (xml/el-text formula)}
-      serial {:sheets/value (serial->text serial date1904?)}
-      (not (str/blank? (str text))) {:sheets/value (str text)}
+      formula (cond-> {:sheets/formula (xml/el-text formula)}
+                style (assoc :sheets/style style))
+      serial (cond-> {:sheets/value (serial->text serial date1904?)}
+               style (assoc :sheets/style style))
+      (not (str/blank? (str text))) (cond-> {:sheets/value (str text)}
+                                      style (assoc :sheets/style style))
+      ;; A cell with a style and nothing in it is formatting somebody
+      ;; applied to an empty column, which the writer keeps too.
+      style {:sheets/style style}
       :else nil)))
 
 (defn reading-context
