@@ -29,6 +29,24 @@ the schema, so the reader is here rather than in `transit`:
 (wire/cell-address-string [1 1])               ; "[1 1]", for reaching into a projection
 ```
 
+## CSV
+
+```clojure
+(csv/tab->csv (m/tab-by-id wb "plan"))    ; one tab out, RFC 4180
+(csv/import-csv wb "data" text)           ; text in, as a tab of that id
+```
+
+A tab and not a workbook: CSV has no idea a workbook has more than one, and
+pretending otherwise means inventing a convention nothing on the other end
+would agree with.
+
+Everything read is text — CSV does not say what a field is, and guessing is
+how a part number becomes a float. An empty field is left out rather than
+stored as `""`, because a missing cell and an empty one are different things
+to anything counting them. A field beginning with `=` is a formula, and a
+formula writes back as `=EXPR` rather than as its value: there is no
+evaluator here, so the value is not something this could write.
+
 Rehydrate before validating. `sheets.validate` reads namespaced keys, and on
 a projected payload it finds none — reporting no problems rather than
 reporting that it cannot see any.
