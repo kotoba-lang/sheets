@@ -37,11 +37,24 @@
   with the value Excel last calculated. The reader handles all of them and
   keeps the formula rather than the cached value — see `cell-value`.
 
-  What it does not handle is styles, and therefore dates: Excel stores a
-  date as a serial number whose *format* is what makes it a date, so one
-  arrives here as `45000` rather than a day. Reading styles is the next
-  thing this needs, and pretending otherwise would put a wrong date in a
-  cell rather than an obvious number."
+  It also reads dates, which are not a type in Excel but a number under a
+  format that says so. That means reading `xl/styles.xml`, and it is the one
+  place this namespace converts rather than passing text through: `45000` is
+  a number until the document says it is a day, and then it is
+  `2023-03-15`. See the dates section.
+
+  What it still does not read is anything about appearance — fonts, fills,
+  widths, merges — because nothing in this model can hold them. A workbook
+  that goes out through `xlsx-files` and comes back is the cells and the
+  sheet names, and says so.
+
+  ## Both hosts, actually run
+
+  This is `.cljc`, and `clojure -M:test` exercises one host. `scripts/
+  test-cljs.cljs` runs the same namespaces under nbb, because the first two
+  bugs found here — `column-name` emitting control characters and
+  `column-number` reading every column as 1 — existed only under
+  ClojureScript and passed every JVM test."
   (:require [clojure.string :as str]
             [ooxml.core :as ooxml]
             [sheets.csv :as csv]
@@ -55,18 +68,26 @@
 (def ^:private rels-ns
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
 
+(def ^:private alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
 (defn column-name
   "1 → A, 26 → Z, 27 → AA.
 
   Bijective base-26: there is no zero digit, so the usual division has to
   borrow one before each step. Getting this wrong gives a workbook whose
-  27th column is `BA`, which Excel opens without complaint and reads wrong."
+  27th column is `BA`, which Excel opens without complaint and reads wrong.
+
+  The letter comes out of `alphabet` by index rather than out of arithmetic
+  on a character code — see `column-number` for why `(int \\A)` is not
+  portable. Here it was worse than wrong: `(char (+ 0 rem))` produced control
+  characters, so every cell reference in a workbook written from nbb was
+  unprintable."
   [col]
   (loop [n (long col) out ""]
     (if (pos? n)
       (let [rem (mod (dec n) 26)]
         (recur (quot (dec n) 26)
-               (str (char (+ (int \A) rem)) out)))
+               (str (subs alphabet rem (inc rem)) out)))
       out)))
 
 (defn cell-ref [row col]
@@ -192,6 +213,171 @@
            (.closeEntry zip)))
        (.toByteArray out))))
 
+;; ── dates, which are numbers wearing a format ───────────────────────────────
+;;
+;; Excel has no date type. A date is a number counting days from an epoch,
+;; and what makes it a date is the *format* the cell's style points at. So
+;; reading one back means reading `xl/styles.xml`, and a reader that skips
+;; styles reports 45000 for a cell every human involved calls a date.
+;;
+;; This is not the guess `sheets.csv` and `cell-value` refuse. Nothing in a
+;; CSV field says it is a number, so calling it one is a guess. Here the
+;; document says so, in a part written for the purpose — converting is
+;; reading what it says, and declining to would be ignoring it.
+
+(defn- parse-int-safe [x]
+  (when x
+    #?(:clj (try (Long/parseLong (str/trim (str x))) (catch Exception _ nil))
+       :cljs (let [n (js/parseInt (str x) 10)] (when-not (js/isNaN n) n)))))
+
+(defn- pad
+  "`7` at width 2 is `07`. Written out because `format` is JVM-only and this
+  namespace is not."
+  [n width]
+  (let [s (str n)]
+    (str (apply str (repeat (max 0 (- width (count s))) "0")) s)))
+
+(def builtin-date-formats
+  "The `numFmtId`s that mean a date or a time without saying so.
+
+  14-17 dates, 18-21 times, 22 date and time, 45-47 elapsed time. These are
+  fixed by the spec and never written into the file, which is why a reader
+  has to carry the list rather than look it up."
+  (into #{} (concat (range 14 23) (range 45 48))))
+
+(defn date-format-code?
+  "Whether a custom format code formats a date or a time.
+
+  Quoted literals are skipped, because `\"month\"` is a word and not four
+  format tokens; `[Red]`-style conditions are skipped for the same reason;
+  and a backslash escapes whatever follows. `m` is months or minutes
+  depending on what precedes it, but either way the cell is temporal, so
+  this does not have to tell them apart."
+  [code]
+  (let [code (str code)
+        n (count code)]
+    (loop [i 0]
+      (if (>= i n)
+        false
+        (let [ch (nth code i)]
+          (cond
+            (= ch \\) (recur (+ i 2))
+            (= ch \") (recur (inc (or (str/index-of code "\"" (inc i)) (dec n))))
+            (= ch \[) (recur (inc (or (str/index-of code "]" (inc i)) (dec n))))
+            (contains? #{\y \Y \d \D \h \H \s \S \m \M} ch) true
+            :else (recur (inc i))))))))
+
+(defn styles
+  "`{:formats [numFmtId …] :custom {id code}}` from `xl/styles.xml`.
+
+  `:formats` is indexed by a cell's `s` attribute, which is a *position* in
+  `cellXfs` and not a format id. Reading it as an id gives every cell the
+  format of whichever style happens to sit at that number — wrong in the way
+  that still produces plausible dates."
+  [files]
+  (if-let [xml-str (get files "xl/styles.xml")]
+    (let [root (xml/parse xml-str)
+          custom (into {}
+                       (keep (fn [el]
+                               (when-let [id (xml/el-attr el "numFmtId")]
+                                 [id (xml/el-attr el "formatCode")])))
+                       (xml/find-all root :numFmt))
+          xfs (some-> (first (xml/find-all root :cellXfs)) (xml/find-all :xf))]
+      {:formats (mapv #(xml/el-attr % "numFmtId") (or xfs []))
+       :custom custom})
+    {:formats [] :custom {}}))
+
+(defn date-style?
+  "Whether the cell style at index `s` formats a date."
+  [{:keys [formats custom]} s]
+  (boolean
+   (when-let [id (get formats (or (parse-int-safe s) -1))]
+     (or (contains? builtin-date-formats (parse-int-safe id))
+         (some-> (get custom id) date-format-code?)))))
+
+(defn date1904?
+  "Whether the workbook counts from 1904 rather than 1900.
+
+  Declared by `<workbookPr date1904=\"1\"/>`, and asked rather than assumed:
+  a file written on one system and read as the other is off by 1462 days —
+  four years and a day, which looks like a plausible date rather than an
+  obvious error."
+  [files]
+  (boolean
+   (when-let [xml-str (get files "xl/workbook.xml")]
+     (some #(contains? #{"1" "true"} (xml/el-attr % "date1904"))
+           (xml/find-all (xml/parse xml-str) :workbookPr)))))
+
+(defn civil-from-days
+  "`[y m d]` from a count of days since 1970-01-01.
+
+  Howard Hinnant's algorithm, written out rather than delegated: this is a
+  `.cljc` namespace and `java.time` is half of the hosts it runs on. Exact
+  for every proleptic Gregorian date, which matters because the alternative
+  — approximating with 365.25 — drifts by a day somewhere every century."
+  [z]
+  (let [z (+ (long z) 719468)
+        era (quot (if (>= z 0) z (- z 146096)) 146097)
+        doe (- z (* era 146097))
+        yoe (quot (- doe (quot doe 1460) (- (quot doe 36524)) (quot doe 146096)) 365)
+        y (+ yoe (* era 400))
+        doy (- doe (+ (* 365 yoe) (quot yoe 4) (- (quot yoe 100))))
+        mp (quot (+ (* 5 doy) 2) 153)
+        d (inc (- doy (quot (+ (* 153 mp) 2) 5)))
+        m (+ mp (if (< mp 10) 3 -9))]
+    [(if (<= m 2) (inc y) y) m d]))
+
+(def ^:private serial-epoch-days
+  "Days from 1970-01-01 back to each system's serial 0.
+
+  1900: -25568 puts serial 1 at 1900-01-01. 1904: -24107 puts serial 0 at
+  1904-01-01."
+  {:1900 -25568 :1904 -24107})
+
+(defn serial->date-time
+  "An Excel serial as `[YYYY-MM-DD HH:MM:SS-or-nil]`.
+
+  The 1900 leap bug: Excel believes 1900 was a leap year, so serial 60 is a
+  29th of February that did not happen and everything above it is one day
+  further along than the arithmetic says. Below 60 the sheet and the
+  calendar agree. Getting this wrong is a silent off-by-one for the first
+  eight weeks of 1900 or for every date after it, depending which way."
+  [serial date1904?]
+  (let [serial (double serial)
+        whole (long (Math/floor serial))
+        fraction (- serial whole)
+        epoch (get serial-epoch-days (if date1904? :1904 :1900))
+        ;; Serial 60 does not exist; 61 onwards needs the extra day removed.
+        adjusted (if (or date1904? (< whole 60)) whole (dec whole))
+        [y m d] (civil-from-days (+ epoch adjusted))
+        seconds (long (Math/round (* fraction 86400.0)))]
+    [(str (pad y 4) "-" (pad m 2) "-" (pad d 2))
+     (when (pos? seconds)
+       (str (pad (quot seconds 3600) 2) ":"
+            (pad (quot (mod seconds 3600) 60) 2) ":"
+            (pad (mod seconds 60) 2)))]))
+
+(defn serial->text
+  "An Excel serial as the text a person would recognise: `2023-03-15`, or
+  `2023-03-15T09:30:00` when there is a time in it.
+
+  Text because that is the only thing this model holds. A date read here is
+  still a string in a cell — what changed is that it is the string somebody
+  would have written."
+  [serial date1904?]
+  (let [[date time] (serial->date-time serial date1904?)]
+    (if time (str date "T" time) date)))
+
+(defn- serial-of
+  "The number in a cell's text, or nil when it is not one.
+
+  Nil rather than zero: a style can say `date` over a cell holding a word,
+  and 1899-12-30 for it would be an invention."
+  [text]
+  (when text
+    #?(:clj (try (Double/parseDouble (str/trim (str text))) (catch Exception _ nil))
+       :cljs (let [n (js/parseFloat (str text))] (when-not (js/isNaN n) n)))))
+
 ;; ── reading one back ────────────────────────────────────────────────────────
 ;;
 ;; Writing got to choose one representation for everything. Reading meets all
@@ -201,19 +387,32 @@
 
 (defn column-number
   "`A` → 1, `AA` → 27. The inverse of `column-name`, and the same borrowing
-  in the other direction."
+  in the other direction. Nil for anything that is not all letters.
+
+  The position is looked up in `alphabet` rather than computed from a
+  character code, because `(int ch)` does not mean the same thing on both
+  hosts: on the JVM a character is a `Character` and `int` is its code
+  point, in ClojureScript it is a one-character string and `int` coerces it
+  to 0. That made every column read as 1 under cljs — invisibly, because A
+  *is* 1, and `AA` came out as 27 by coincidence. Portable code that reaches
+  for `int` on a character is making a host assumption it does not state."
   [letters]
-  (reduce (fn [n ch] (+ (* 26 n) (inc (- (int ch) (int \A)))))
-          0
-          (str/upper-case (str letters))))
+  (let [s (str/upper-case (str letters))]
+    (when (seq s)
+      (reduce (fn [n ch]
+                (if-let [i (str/index-of alphabet ch)]
+                  (+ (* 26 n) (inc i))
+                  (reduced nil)))
+              0
+              s))))
 
 (defn parse-ref
   "`B12` → `[12 2]`. Nil for anything that is not a cell reference, so a
   malformed one is dropped rather than becoming cell `[0 0]`."
   [ref]
   (when-let [[_ letters digits] (re-matches #"([A-Za-z]+)(\d+)" (str ref))]
-    [#?(:clj (Long/parseLong digits) :cljs (js/parseInt digits 10))
-     (column-number letters)]))
+    (when-let [col (column-number letters)]
+      [#?(:clj (Long/parseLong digits) :cljs (js/parseInt digits 10)) col])))
 
 (defn- all-text
   "Every `<t>` under `el`, concatenated.
@@ -248,8 +447,11 @@
   The number is kept as text on purpose. This model has no number type —
   `sheets.csv` reads every field as a string for a stated reason — and
   turning `1200` into a long here would be that guess arriving from the
-  other side of the same document."
-  [cell strings]
+  other side of the same document.
+
+  The one number that does change is a dated one, and only because the
+  workbook says it is dated. See the dates section above."
+  [cell {:keys [strings styles date1904?]}]
   (let [t (xml/el-attr cell "t")
         formula (first (xml/find-all cell :f))
         v (first (xml/find-all cell :v))
@@ -259,23 +461,47 @@
                            (get strings
                                 #?(:clj (try (Long/parseLong i) (catch Exception _ -1))
                                    :cljs (js/parseInt i 10))))
-               :else (some-> v xml/el-text))]
+               :else (some-> v xml/el-text))
+        ;; Only an untyped cell — the number case — can be a date. A shared
+        ;; string under a date format is still a string, whatever the style
+        ;; claims.
+        serial (when (and (nil? t) styles (date-style? styles (xml/el-attr cell "s")))
+                 (serial-of text))]
     (cond
       ;; A formula wins over its cached value: the formula is what the
       ;; document says and the value is what Excel last thought. Keeping the
       ;; value instead would turn a spreadsheet into a printout of one.
       formula {:sheets/formula (xml/el-text formula)}
+      serial {:sheets/value (serial->text serial date1904?)}
       (not (str/blank? (str text))) {:sheets/value (str text)}
       :else nil)))
 
+(defn reading-context
+  "What reading a worksheet needs from the rest of the package: the string
+  table, the style table, and which epoch the workbook counts from.
+
+  Gathered once per workbook rather than per sheet, because `xl/styles.xml`
+  is one part for the whole file and parsing it per worksheet would be the
+  same work multiplied by the tab count."
+  [files]
+  {:strings (shared-strings files)
+   :styles (styles files)
+   :date1904? (date1904? files)})
+
 (defn sheet->tab
-  "One worksheet part as a tab."
-  ([xml-str id] (sheet->tab xml-str id [] {}))
-  ([xml-str id strings attrs]
-   (let [root (xml/parse xml-str)]
+  "One worksheet part as a tab.
+
+  The third argument is a `reading-context`. A vector is accepted there too
+  and read as the string table alone — the shape this took before styles
+  were read, kept working because a caller with no styles to offer is asking
+  the honest question."
+  ([xml-str id] (sheet->tab xml-str id {} {}))
+  ([xml-str id ctx attrs]
+   (let [ctx (if (map? ctx) ctx {:strings ctx})
+         root (xml/parse xml-str)]
      (reduce (fn [tab cell]
                (let [[row col] (parse-ref (xml/el-attr cell "r"))
-                     value (when row (cell-value cell strings))]
+                     value (when row (cell-value cell ctx))]
                  (if value
                    (assoc-in tab [:sheets/cells [row col]] value)
                    tab)))
@@ -316,7 +542,7 @@
   missing its relationships still comes in rather than coming in empty."
   ([files] (workbook-from-files files "wb"))
   ([files id]
-   (let [strings (shared-strings files)
+   (let [ctx (reading-context files)
          declared (sheet-order files)
          sheets (if (seq declared)
                   declared
@@ -326,7 +552,7 @@
                        (map-indexed (fn [i path]
                                       {:path path :name (str "Sheet" (inc i))}))))]
      (reduce (fn [wb {:keys [path name]}]
-               (model/add-tab wb (sheet->tab (get files path) name strings
+               (model/add-tab wb (sheet->tab (get files path) name ctx
                                              {:sheets/title name})))
              (model/workbook id)
              sheets))))
