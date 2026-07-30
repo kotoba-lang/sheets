@@ -61,7 +61,7 @@
   a named range here is as likely to be 売上 as Sales. An allowlist of ASCII
   letters would make every non-English name unspellable, which is a strange
   thing for this Drive to decide."
-  (set " \t\n+-*/^%(),:<>=&\""))
+  (set " \t\n+-*/^%(),:<>=&\"'!"))
 
 (defn- word-token
   "A run of anything that is not a stop — a cell reference, a function name,
@@ -101,6 +101,12 @@
             (contains? (set "0123456789") c)
             (let [[t j] (number-token s i)] (recur j (conj out [:number t])))
             (= \" c) (let [[t j] (string-token s i)] (recur j (conj out [:string t])))
+            ;; A single-quoted run is a *sheet name*, not a string literal —
+            ;; a spreadsheet spells `'売上 表'!A1` that way, and there is no
+            ;; single-quoted string in a formula for it to be confused with.
+            (= \' c) (let [j (or (str/index-of s "'" (inc i)) (count s))]
+                       (recur (inc j) (conj out [:word (subs s (inc i) j)])))
+            (= \! c) (recur (inc i) (conj out [:bang "!"]))
             (contains? (set "+-*/^%(),:") c)
             (recur (inc i) (conj out [(get {\( :lparen \) :rparen \, :comma
                                             \: :colon}
@@ -167,6 +173,17 @@
 
       (= :word kind)
       (cond
+        ;; `売上表!A1` and `'売上 表'!A1:A3` — a reference on another sheet.
+        ;; The sheet name is a word here whether it was quoted or not, so
+        ;; both spellings arrive the same shape.
+        (= :bang (first (first (rest ts))))
+        (let [after (rest (rest ts))
+              from (second (first after))]
+          (if (= :colon (first (first (rest after))))
+            [[:range from (second (first (rest (rest after)))) text]
+             (rest (rest (rest after)))]
+            [[:ref from text] (rest after)]))
+
         ;; A name followed by `(` is a call; otherwise it is a reference,
         ;; and a reference that is not one is `#NAME?`.
         (= :lparen (first (first (rest ts))))
@@ -380,9 +397,17 @@
              (cond (error? v) v
                    (as-number v) (- (as-number v))
                    :else "#VALUE!"))
-      :ref (let [[row col] (parse-ref a)]
+      :ref (let [[row col] (parse-ref a)
+                 sheet (nth node 2 nil)
+                 ;; A qualified reference reads another sheet; an
+                 ;; unqualified one reads this one. `#REF!` for a sheet that
+                 ;; is not there, which is what a spreadsheet says about an
+                 ;; address it cannot resolve.
+                 target (if sheet (get (:tabs opts) sheet) tab)
+                 opts (cond-> opts sheet (assoc :sheet sheet))]
              (cond
-               row (value-at tab row col seen opts)
+               (and sheet (nil? target)) "#REF!"
+               row (value-at target row col seen opts)
                ;; A word that is not a cell reference may be a named range —
                ;; `=SUM(売上)`. Resolved to the range it stands for and then
                ;; evaluated as one, so a name behaves exactly like the
@@ -395,14 +420,19 @@
                ;; Neither an address nor a name anybody defined. Excel's
                ;; answer for a word it does not know.
                :else "#NAME?"))
-      :range (let [from (parse-ref a) to (parse-ref b)]
-               (if (and from to)
+      :range (let [from (parse-ref a) to (parse-ref b)
+                   sheet (nth node 3 nil)
+                   target (if sheet (get (:tabs opts) sheet) tab)
+                   opts (cond-> opts sheet (assoc :sheet sheet))]
+               (cond
+                 (and sheet (nil? target)) "#REF!"
+                 (and from to)
                  (vec (for [row (range (min (first from) (first to))
                                        (inc (max (first from) (first to))))
                             col (range (min (second from) (second to))
                                        (inc (max (second from) (second to))))]
-                        (value-at tab row col seen opts)))
-                 "#REF!"))
+                        (value-at target row col seen opts)))
+                 :else "#REF!"))
       ;; `IF` chooses before it computes. Everything else takes evaluated
       ;; arguments, and evaluating both branches of an IF defeats the thing
       ;; it is most used for: `IF(A1=0,"ゼロ",100/A1)` guards a division by
@@ -443,16 +473,24 @@
   `seen` is the chain of cells being computed. A cell that appears in its own
   chain is `#CIRCULAR!` — reported rather than recursed into, because the
   alternative is a stack overflow, and a spreadsheet that crashes on a
-  self-reference is worse than one that says so."
+  self-reference is worse than one that says so.
+
+  The chain is keyed by **sheet and cell**, not by cell. With one tab those
+  are the same thing; with two, `売上表!A1` and `原価表!A1` are both `[1 1]`,
+  so a cell-only key calls an ordinary cross-tab reference a cycle — and
+  would miss a real one that goes out to another sheet and back."
   ([tab row col] (value-at tab row col #{} {}))
   ([tab row col seen] (value-at tab row col seen {}))
   ([tab row col seen opts]
-   (let [key [row col]
-         cell (get-in tab [:sheets/cells key])]
+   (let [;; Two keys, not one. The cells map is addressed by cell; the chain
+         ;; of what is being computed is addressed by sheet *and* cell,
+         ;; because two tabs both have an A1.
+         cell (get-in tab [:sheets/cells [row col]])
+         link [(:sheet opts) row col]]
      (cond
-       (contains? seen key) "#CIRCULAR!"
+       (contains? seen link) "#CIRCULAR!"
        (contains? cell :sheets/formula)
-       (let [v (eval-node (parse (:sheets/formula cell)) tab (conj seen key) opts)]
+       (let [v (eval-node (parse (:sheets/formula cell)) tab (conj seen link) opts)]
          (cond (error? v) v
                (number? v) (format-number v)
                (boolean? v) (if v "TRUE" "FALSE")
@@ -503,7 +541,16 @@
   names, because names live on the workbook and a tab does not know which
   workbook it is in."
   [workbook]
-  (into {}
-        (map (fn [[tab-id tab]]
-               [tab-id (values tab {:names (names-of workbook tab)})]))
-        (:sheets/tabs workbook)))
+  ;; Keyed by title, the same as a named range and the same as a
+  ;; `definedName` — a formula writes `売上表!A1`, which is the sheet's name
+  ;; and not the key it happens to be stored under.
+  (let [by-name (into {}
+                      (map (fn [[tab-id tab]]
+                             [(or (:sheets/title tab) tab-id) tab]))
+                      (:sheets/tabs workbook))]
+    (into {}
+          (map (fn [[tab-id tab]]
+                 [tab-id (values tab {:names (names-of workbook tab)
+                                      :tabs by-name
+                                      :sheet (or (:sheets/title tab) tab-id)})]))
+          (:sheets/tabs workbook))))

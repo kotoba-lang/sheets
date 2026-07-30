@@ -146,6 +146,23 @@ Excel spells "test one column, total another".
 
 Not implemented: everything else, which is `#NAME?` rather than a crash.
 
+**A formula can read another sheet.** `原価表!A1`, `SUM(原価表!A1:A2)`, and
+`'売上 表'!A1` when the name has a space — a single-quoted run in a formula
+is a sheet name, and there is no single-quoted string for it to be confused
+with. A sheet that is not there is `#REF!`, which is what a spreadsheet says
+about an address it cannot resolve, rather than `#NAME?`, which is what it
+says about a word it does not know.
+
+The chain of cells being computed is keyed by **sheet and cell**. With one
+tab those are the same thing; with two, `売上表!A1` and `原価表!A1` are both
+`[1 1]`, so a cell-only key reports an ordinary cross-tab reference as a
+cycle — and misses a real one that goes out to another sheet and back. Both
+halves are tested.
+
+`values` on a bare tab has no workbook to resolve a sheet name against, so a
+qualified reference there is `#REF!` rather than a wrong number. Use
+`workbook-values`.
+
 **Named ranges resolve.** `=SUM(売上)` where 売上 is `A1:A3` on this tab.
 Use `workbook-values`, not `values`: a name belongs to the workbook and a
 tab does not know which workbook it is in. The tab is matched by its

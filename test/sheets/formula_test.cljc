@@ -289,3 +289,76 @@
                               (m/put-formula 2 1 "SUM(合計)")))
                (m/add-named-range "合計" {:sheets/tab "t" :sheets/range "A1:A1"}))]
     (is (= "7" (get-in (f/workbook-values wb) ["t" [2 1]])))))
+
+;; ── across tabs ─────────────────────────────────────────────────────────────
+
+(defn- two-sheets [& formulas]
+  (-> (m/workbook "wb")
+      (m/add-tab (reduce (fn [tab [row expr]] (m/put-formula tab row 1 expr))
+                         (-> (m/tab "sheet1" {:sheets/title "売上表"})
+                             (m/put-cell 1 1 "1200") (m/put-cell 2 1 "1300"))
+                         (partition 2 formulas)))
+      (m/add-tab (-> (m/tab "sheet2" {:sheets/title "原価表"})
+                     (m/put-cell 1 1 "700") (m/put-cell 2 1 "800")))))
+
+(defn- across [expr]
+  (get-in (f/workbook-values (two-sheets 9 expr)) ["sheet1" [9 1]]))
+
+(deftest a-formula-can-read-another-sheet
+  ;; A workbook can have more than one tab now, and a formula that cannot
+  ;; reach the other one is the thing a person hits immediately after making
+  ;; it.
+  (is (= "700" (across "原価表!A1")))
+  (is (= "1500" (across "SUM(原価表!A1:A2)")))
+  (is (= "500" (across "A1-原価表!A1")) "this sheet's A1 minus that one's")
+  (is (= "4000" (across "SUM(A1:A2)+SUM(原価表!A1:A2)"))
+      "2500 on this sheet plus 1500 on that one"))
+
+(deftest a-sheet-name-may-be-quoted
+  ;; Which is how a spreadsheet spells one containing a space, and there is
+  ;; no single-quoted string in a formula for it to be confused with.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (-> (m/tab "s1" {:sheets/title "第一"})
+                              (m/put-formula 1 1 "'売上 表'!A1")))
+               (m/add-tab (-> (m/tab "s2" {:sheets/title "売上 表"})
+                              (m/put-cell 1 1 "42"))))]
+    (is (= "42" (get-in (f/workbook-values wb) ["s1" [1 1]]))))
+  ;; And quoting one that needs no quotes is the same reference.
+  (is (= "700" (across "'原価表'!A1"))))
+
+(deftest a-sheet-that-is-not-there-is-a-broken-address
+  ;; `#REF!` — what a spreadsheet says about an address it cannot resolve —
+  ;; rather than `#NAME?`, which is what it says about a word it does not
+  ;; know.
+  (is (= "#REF!" (across "無い表!A1")))
+  (is (= "#REF!" (across "SUM(無い表!A1:A2)"))))
+
+(deftest two-tabs-both-have-an-A1
+  ;; The reason the chain of cells being computed is keyed by sheet *and*
+  ;; cell. Keyed by cell alone, 売上表!A1 reading 原価表!A1 is a cell
+  ;; appearing in its own chain — an ordinary cross-tab reference reported
+  ;; as a cycle.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (-> (m/tab "s1" {:sheets/title "売上表"})
+                              (m/put-formula 1 1 "原価表!A1")))
+               (m/add-tab (-> (m/tab "s2" {:sheets/title "原価表"})
+                              (m/put-cell 1 1 "700"))))]
+    (is (= "700" (get-in (f/workbook-values wb) ["s1" [1 1]]))
+        "not #CIRCULAR!")))
+
+(deftest a-cycle-that-goes-through-another-sheet-is-still-a-cycle
+  ;; And the half a cell-only key would miss: out to another sheet and back.
+  (let [wb (-> (m/workbook "wb")
+               (m/add-tab (-> (m/tab "s1" {:sheets/title "売上表"})
+                              (m/put-formula 1 1 "原価表!B1")))
+               (m/add-tab (-> (m/tab "s2" {:sheets/title "原価表"})
+                              (m/put-formula 1 2 "売上表!A1"))))
+        vs (f/workbook-values wb)]
+    (is (= "#CIRCULAR!" (get-in vs ["s1" [1 1]])))
+    (is (= "#CIRCULAR!" (get-in vs ["s2" [1 2]])))))
+
+(deftest a-tab-alone-cannot-see-another-tab
+  ;; `values` on a bare tab has no workbook, so a qualified reference has
+  ;; nothing to resolve against. #REF! rather than a wrong number.
+  (let [tab (-> (m/tab "t" {}) (m/put-formula 1 1 "原価表!A1"))]
+    (is (= "#REF!" (f/value-at tab 1 1)))))
