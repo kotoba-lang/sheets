@@ -214,8 +214,23 @@ somebody defined and cannot see is a thing to say rather than to hide.
 
 The axis top is a round number — one, two or five times a power of ten —
 because a bar touching the frame reads as clipped and a fixed percentage
-produces labels like 1,127. `.xlsx` still does not carry a chart, and
-`unexpressed` still says so.
+produces labels like 1,127.
+
+**And `.xlsx` carries them.** A chart in a spreadsheet is four parts and a
+chain of relationships: the sheet points at a drawing, the drawing at a
+chart, and the chart back at the cells. A link missing anywhere gives a file
+that opens with no chart and no complaint, so all of them are written
+together — including a content type for each new part, without which Excel
+does not read it at all.
+
+The series names its cells *and* caches what they hold. Both: the reference
+is what Excel recalculates from, and the cache is what every other reader
+draws — a chart with only the reference is blank in anything that does not
+evaluate formulas.
+
+Only a chart naming a tab the workbook does not have is still dropped: there
+is no sheet for its drawing to sit on, and one anchored to nothing opens as
+an empty frame.
 
 ## Cell styles
 

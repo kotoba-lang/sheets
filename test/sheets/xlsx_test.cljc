@@ -386,10 +386,17 @@
     (is (= :info (:sheets/severity (first entries)))
         "a format not carrying something is a property of the format")))
 
-(deftest named-ranges-and-charts-are-named
+(deftest what-a-name-or-a-chart-still-loses-is-having-nowhere-to-go
+  ;; Both are written now, so what is reported is the one case that cannot
+  ;; be: pointing at a tab the workbook does not have. A name like that
+  ;; becomes a reference to a missing sheet and a chart like that has no
+  ;; sheet for its drawing to sit on — both open as something broken rather
+  ;; than as something absent.
   (let [wb (-> (m/workbook "wb")
-               (m/add-named-range "総計" {:sheets/ref "A1:B9"})
-               (m/add-chart {:sheets/id "c1" :sheets/type :bar}))
+               (m/add-tab (m/tab "t" {:sheets/title "t"}))
+               (m/add-named-range "総計" {:sheets/tab "無い表" :sheets/range "A1:B9"})
+               (m/add-chart {:sheets/id "c1" :sheets/tab "無い表"
+                             :sheets/data-range "A1:B9"}))
         codes (set (map :sheets/code (xlsx/unexpressed wb)))]
     (is (contains? codes :xlsx/named-ranges-dropped))
     (is (contains? codes :xlsx/charts-dropped))))
@@ -547,3 +554,95 @@
         cell (m/get-cell tab 1 1)]
     (is (= "2023-03-15" (:sheets/value cell)) "read as a date")
     (is (= {:bold true} (:sheets/style cell)) "and as bold")))
+
+;; ── charts in the file ──────────────────────────────────────────────────────
+
+(defn- charted [& [kind]]
+  (-> (m/workbook "wb")
+      (m/add-tab (-> (m/tab "sheet1" {:sheets/title "売上"})
+                     (m/put-cell 1 1 "Q1") (m/put-cell 1 2 "1200")
+                     (m/put-cell 2 1 "Q2") (m/put-cell 2 2 "800")
+                     (m/put-formula 3 1 "\"合計\"") (m/put-formula 3 2 "SUM(B1:B2)")))
+      (m/add-chart {:sheets/id "c1" :sheets/title "四半期" :sheets/tab "売上"
+                    :sheets/data-range "A1:B3"
+                    :sheets/chart-type (or kind :bar)})))
+
+(deftest every-link-in-the-chain-is-written
+  ;; Sheet → drawing → chart → cells. A link missing anywhere gives a file
+  ;; that opens with no chart and no complaint, which is the failure worth
+  ;; testing for rather than the chart XML looking plausible.
+  (let [files (xlsx/xlsx-files (charted))]
+    (is (contains? files "xl/charts/chart1-1.xml"))
+    (is (contains? files "xl/drawings/drawing1.xml"))
+    (is (contains? files "xl/drawings/_rels/drawing1.xml.rels"))
+    (is (contains? files "xl/worksheets/_rels/sheet1.xml.rels"))
+    ;; The sheet points at the drawing…
+    (is (str/includes? (get files "xl/worksheets/sheet1.xml") "<drawing r:id=\"rId1\"/>"))
+    (is (str/includes? (get files "xl/worksheets/_rels/sheet1.xml.rels")
+                       "../drawings/drawing1.xml"))
+    ;; …the drawing at the chart…
+    (is (str/includes? (get files "xl/drawings/_rels/drawing1.xml.rels")
+                       "../charts/chart1-1.xml"))
+    ;; …and the chart at the cells.
+    (is (str/includes? (get files "xl/charts/chart1-1.xml") "'売上'!$B$1:$B$3"))
+    ;; Both new parts have a content type; one without is a part Excel does
+    ;; not read.
+    (let [types (get files "[Content_Types].xml")]
+      (is (str/includes? types "/xl/drawings/drawing1.xml"))
+      (is (str/includes? types "/xl/charts/chart1-1.xml"))
+      (is (str/includes? types "drawingml.chart+xml")))))
+
+(deftest the-drawing-comes-after-the-sheet-data
+  ;; The schema fixes the order and a `<drawing>` before `</sheetData>` is a
+  ;; file Excel refuses.
+  (let [sheet (get (xlsx/xlsx-files (charted)) "xl/worksheets/sheet1.xml")]
+    (is (< (.indexOf sheet "</sheetData>") (.indexOf sheet "<drawing")))))
+
+(deftest the-series-names-its-cells-and-caches-what-they-hold
+  ;; Both: the reference is what Excel recalculates from, and the cache is
+  ;; what every other reader draws — a chart with only the reference is
+  ;; blank in anything that does not evaluate formulas.
+  (let [chart (get (xlsx/xlsx-files (charted)) "xl/charts/chart1-1.xml")]
+    (is (str/includes? chart "<c:f>'売上'!$B$1:$B$3</c:f>"))
+    (is (str/includes? chart "<c:numCache>"))
+    ;; The formula's total, cached — reading :sheets/value would cache
+    ;; nothing for that cell.
+    ;; 2000, not 2000.0 — and the same on both hosts, which `(str (double
+    ;; v))` was not.
+    (is (str/includes? chart "<c:v>2000</c:v>"))
+    ;; And the headings became the category axis.
+    (is (str/includes? chart "'売上'!$A$1:$A$3"))
+    (is (str/includes? chart "<c:v>Q1</c:v>"))))
+
+(deftest each-kind-writes-its-own-plot
+  (is (str/includes? (get (xlsx/xlsx-files (charted :bar)) "xl/charts/chart1-1.xml")
+                     "<c:barChart>"))
+  (is (str/includes? (get (xlsx/xlsx-files (charted :line)) "xl/charts/chart1-1.xml")
+                     "<c:lineChart>"))
+  (is (str/includes? (get (xlsx/xlsx-files (charted :pie)) "xl/charts/chart1-1.xml")
+                     "<c:pieChart>"))
+  ;; A bar and a line need axes; naming an axId without defining it is a
+  ;; file Excel refuses. A pie has neither.
+  (is (str/includes? (get (xlsx/xlsx-files (charted :bar)) "xl/charts/chart1-1.xml")
+                     "<c:catAx>"))
+  (is (not (str/includes? (get (xlsx/xlsx-files (charted :pie)) "xl/charts/chart1-1.xml")
+                          "<c:catAx>"))))
+
+(deftest a-workbook-with-no-charts-has-no-drawing-parts
+  (let [files (xlsx/xlsx-files (plan))]
+    (is (not-any? #(str/includes? % "drawing") (keys files)))
+    (is (not-any? #(str/includes? % "chart") (keys files)))
+    (is (not (str/includes? (get files "xl/worksheets/sheet1.xml") "<drawing")))))
+
+(deftest a-chart-on-a-tab-that-is-not-there-is-dropped-and-reported
+  ;; There is no sheet for its drawing to sit on, and one anchored to
+  ;; nothing opens as an empty frame.
+  (let [wb (m/add-chart (charted) {:sheets/id "orphan" :sheets/tab "無い表"
+                                   :sheets/data-range "A1:B3"})
+        files (xlsx/xlsx-files wb)]
+    (is (contains? files "xl/charts/chart1-1.xml"))
+    (is (not (contains? files "xl/charts/chart1-2.xml")))
+    (is (= [:xlsx/charts-dropped] (mapv :sheets/code (xlsx/unexpressed wb))))
+    (is (str/includes? (:sheets/msg (first (xlsx/unexpressed wb))) "1 件")))
+  ;; And a workbook whose charts all have a home reports nothing.
+  (is (= [] (xlsx/unexpressed (charted)))))
