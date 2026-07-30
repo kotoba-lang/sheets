@@ -47,6 +47,31 @@ to anything counting them. A field beginning with `=` is a formula, and a
 formula writes back as `=EXPR` rather than as its value: there is no
 evaluator here, so the value is not something this could write.
 
+## Excel
+
+```clojure
+(xlsx/xlsx-bytes wb)   ; a .xlsx, JVM
+(xlsx/xlsx-files wb)   ; the parts, for a host without a zip
+```
+
+On `ooxml`, the same division `slides.pptx` uses — that library supplies the
+OPC vocabulary and knows nothing about spreadsheets, and it already
+anticipated this one: `package-kind` returns `:xlsx` for an `xl/` prefix and
+`part-sort-key` orders `xl/worksheets/sheetN.xml`.
+
+Every cell is written as an inline string, including one whose value looks
+like a number. Reading refuses to guess for a stated reason; deciding on the
+workbook's behalf that `0042` is forty-two at the moment it leaves for Excel
+would be the same guess arriving late. Inline strings also mean no
+`sharedStrings.xml` — one part fewer and no string table to keep in step
+with the cells indexing it.
+
+A formula writes `<f>` and no cached `<v>`: there is no evaluator here, so
+Excel recalculates on open.
+
+Export only so far. Reading a .xlsx needs an XML parser and the
+sharedStrings/styles/date-serial handling that writing gets to skip.
+
 Rehydrate before validating. `sheets.validate` reads namespaced keys, and on
 a projected payload it finds none — reporting no problems rather than
 reporting that it cannot see any.
