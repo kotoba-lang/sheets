@@ -23,13 +23,13 @@
          'sheets.chart-test
          'sheets.csv-test
          'sheets.formula-test
-         'sheets.model-test
+         'sheets.edit-test 'sheets.model-test
          'sheets.xlsx-test)
 
 (let [{:keys [fail error]} (t/run-tests 'sheets.chart-test
                                         'sheets.csv-test
                                         'sheets.formula-test
-                                        'sheets.model-test
+                                        'sheets.edit-test 'sheets.model-test
                                         'sheets.xlsx-test)]
   (when (pos? (+ (or fail 0) (or error 0)))
     (js/process.exit 1)))

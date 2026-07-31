@@ -139,6 +139,187 @@
     (when-let [col (model/column-number letters)]
       [#?(:clj (Long/parseLong digits) :cljs (js/parseInt digits 10)) col])))
 
+;; ── moving what a formula points at ─────────────────────────────────────────
+;;
+;; Inserting a row above a formula's target has to move the reference with
+;; it, or the formula quietly starts reading somebody else's number. That is
+;; the reason `sheets.model/sort-range` refuses a range with a formula in it:
+;; sorting moves rows arbitrarily and there is no rule that keeps a reference
+;; pointing at the same value. Inserting and deleting are different — every
+;; row moves by the same amount, in one direction — so there is a rule, and
+;; it is the one every spreadsheet uses.
+
+(defn- word-char?
+  "Whether `c` can be part of a name or a reference.
+
+  A regular expression on the one character rather than
+  `Character/isLetterOrDigit`, which is the JVM's and this file is `.cljc` —
+  the kind of thing that compiles here and throws under nbb."
+  [c]
+  (boolean (re-matches #"[A-Za-z0-9_$]" (str c))))
+
+(def ^:private ref-pattern
+  ;; `$` kept, because a formula that said `$B$2` should still say it: the
+  ;; dollars are about copying, which nothing here does, and rewriting them
+  ;; away would change a file Excel wrote for no reason. They do not stop the
+  ;; shift — inserting a row above `$B$2` moves it to `$B$3` in Excel too.
+  #"(\$?)([A-Za-z]{1,3})(\$?)(\d{1,7})")
+
+(defn- rebuild-ref
+  "`text` with its row or column replaced by `value`, `$` kept."
+  [text axis value]
+  (when-let [[_ col-abs letters row-abs digits] (re-matches ref-pattern text)]
+    (if (= :row axis)
+      (str col-abs letters row-abs value)
+      (str col-abs (model/column-name value) row-abs digits))))
+
+(defn- shifted-ref
+  "One reference after `n` rows or columns are inserted at `at`, or nil when
+  the thing it pointed at is gone.
+
+  `n` is negative for a deletion. A reference into the deleted band has
+  nothing left to point at, which is `#REF!` — the same answer a spreadsheet
+  gives, and a better one than an address that now means a different cell."
+  [text axis at n]
+  (when-let [[_ col-abs letters row-abs digits] (re-matches ref-pattern text)]
+    (when-let [col (model/column-number letters)]
+      (let [row #?(:clj (Long/parseLong digits) :cljs (js/parseInt digits 10))
+            value (if (= :row axis) row col)
+            moved (cond
+                    (< value at) value
+                    (and (neg? n) (< value (+ at (- n)))) nil
+                    :else (+ value n))]
+        (when moved
+          (if (= :row axis)
+            (str col-abs letters row-abs moved)
+            (str col-abs (model/column-name moved) row-abs digits)))))))
+
+(defn- range-partner
+  "`[end other]` when a `:` and a second reference follow position `j`.
+
+  The two halves of `B2:B9` are separate words to the scanner, and moving
+  them separately is what produced `B2:#REF!` for a row removed from inside
+  a range."
+  [s j end]
+  (let [skip (fn [i] (loop [i i] (if (and (< i end) (contains? #{\space \tab} (nth s i)))
+                                   (recur (inc i)) i)))
+        colon (skip j)]
+    (when (and (< colon end) (= \: (nth s colon)))
+      (let [start (skip (inc colon))
+            stop (loop [i start] (if (and (< i end) (word-char? (nth s i))) (recur (inc i)) i))]
+        (when (> stop start) [stop (subs s start stop)])))))
+
+(defn- shifted-range
+  "Both ends of a range after the shift.
+
+  An endpoint inside a removed band is clamped to the edge rather than lost:
+  the range still names the rows that are left. When nothing is left — the
+  band swallowed the whole range — the answer is `#REF!`, once, for the
+  range rather than for each end."
+  [from to axis at n]
+  (let [value (fn [text] (let [[row col] (parse-ref text)] (if (= :row axis) row col)))
+        a (value from) b (value to)
+        low (min a b) high (max a b)]
+    (if-not (neg? n)
+      (str (shifted-ref from axis at n) ":" (shifted-ref to axis at n))
+      (let [band-end (+ at (- n))
+            clamp (fn [v edge]
+                    (cond (< v at) v
+                          (< v band-end) edge
+                          :else (+ v n)))
+            low' (clamp low at)
+            high' (clamp high (dec at))]
+        (if (> low' high')
+          "#REF!"
+          ;; Rendered from the clamped value rather than shifted again:
+          ;; `shifted-ref` would apply the band rule a second time and turn
+          ;; the endpoint it had just been clamped *to* into `#REF!`.
+          (str (rebuild-ref from axis (if (= a low) low' high'))
+               ":"
+               (rebuild-ref to axis (if (= b high) high' low'))))))))
+
+(defn shift-refs
+  "`expr` with its cell references moved, as text.
+
+  `axis` is `:row` or `:col`, `at` the first row or column affected, and `n`
+  how many were inserted — negative for a deletion. A reference to something
+  that was deleted becomes `#REF!`.
+
+  Scanned rather than tokenised and re-emitted. `tokens` throws away
+  whitespace, so rebuilding a formula from it would hand back `A1+B2` for
+  `A1 + B2` — a diff on every formula in the tab, for a change that touched
+  none of them. The scan only has to know the two things that make a run of
+  characters not a reference: a double-quoted string is text, and a
+  single-quoted run is a sheet name.
+
+  `tab` and `home` say which sheet is being changed and which one this
+  formula lives on. A bare `B2` means the formula's own sheet; `売上!B2`
+  means that one. Without both, inserting a row in one tab would move the
+  references in every other tab, which is the same bug in the other
+  direction."
+  ([expr axis at n] (shift-refs expr axis at n nil nil))
+  ([expr axis at n tab home]
+   (let [s (str expr)
+         end (count s)
+         applies? (fn [qualifier]
+                    (or (nil? tab)
+                        (if qualifier (= qualifier tab) (= home tab))))]
+     (loop [i 0 out "" qualifier nil]
+       (if (>= i end)
+         out
+         (let [c (nth s i)]
+           (cond
+             ;; A string literal: copied, and it clears the qualifier — the
+             ;; word after one cannot be a sheet-qualified reference.
+             (= \" c)
+             (let [j (loop [j (inc i)]
+                       (cond (>= j end) end
+                             (and (= \" (nth s j)) (< (inc j) end) (= \" (nth s (inc j))))
+                             (recur (+ j 2))
+                             (= \" (nth s j)) (inc j)
+                             :else (recur (inc j))))]
+               (recur j (str out (subs s i j)) nil))
+
+             ;; A quoted sheet name, which is the qualifier for the
+             ;; reference after the `!`.
+             (= \' c)
+             (let [j (or (str/index-of s "'" (inc i)) end)]
+               (recur (inc j) (str out (subs s i (inc j))) (subs s (inc i) j)))
+
+             (word-char? c)
+             (let [j (loop [j i]
+                       (if (and (< j end)
+                                (word-char? (nth s j)))
+                         (recur (inc j))
+                         j))
+                   word (subs s i j)
+                   ;; A word followed by `!` is a sheet name, not a
+                   ;; reference — `Sheet1!A1` has two words in it.
+                   sheet? (and (< j end) (= \! (nth s j)))]
+               (cond
+                 sheet? (recur j (str out word) word)
+                 (applies? qualifier)
+                 ;; A range is moved as a range. `B2:B3` with row 3 removed
+                 ;; is `B2:B2` and not `B2:#REF!` — an endpoint inside the
+                 ;; removed band is clamped to the edge of it, which is what
+                 ;; a spreadsheet does and what makes deleting a row inside
+                 ;; a SUM the ordinary thing it should be. Only a range with
+                 ;; nothing left in it becomes `#REF!`.
+                 (let [[pair-end other] (range-partner s j end)]
+                   (if (and pair-end (parse-ref word) (parse-ref other))
+                     (recur pair-end
+                            (str out (shifted-range word other axis at n))
+                            nil)
+                     (recur j (str out (or (shifted-ref word axis at n)
+                                           (if (parse-ref word) "#REF!" word)))
+                            nil)))
+                 :else (recur j (str out word) nil)))
+
+             ;; `!` keeps the qualifier the word before it set; anything else
+             ;; clears it.
+             (= \! c) (recur (inc i) (str out c) qualifier)
+             :else (recur (inc i) (str out c) nil))))))))
+
 ;; ── the grammar ─────────────────────────────────────────────────────────────
 ;;
 ;; Precedence, loosest first: comparison, `&`, `+ -`, `* /`, `^`, unary `-`,
