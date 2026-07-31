@@ -1,5 +1,5 @@
 (ns sheets.model-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [sheets.model :as s]
             [sheets.validate :as v]
             [sheets.wire :as wire]))
@@ -54,3 +54,63 @@
                    {"sheets/type" 7}
                    "not-a-workbook-at-all"]]
     (is (some? (wire/rehydrate-workbook payload)) (str "survived: " (pr-str payload)))))
+
+(defn- scores []
+  (-> (s/tab "t" {:sheets/title "点数"})
+      (s/put-cell 1 1 "名前") (s/put-cell 1 2 "点")
+      (s/put-cell 2 1 "b") (s/put-cell 2 2 "20")
+      (s/put-cell 3 1 "a") (s/put-cell 3 2 "100")
+      (s/put-cell 4 1 "c") (s/put-cell 4 2 "3")))
+
+(deftest a-range-sorts-by-a-column-and-the-rows-move-whole
+  ;; Sorting one column and leaving the rest is the classic way to destroy a
+  ;; table, so a row of the range moves together and no caller can ask for
+  ;; anything else.
+  (let [sorted (s/sort-range (scores) 2 1 4 2 2)]
+    (is (= [["c" "3"] ["b" "20"] ["a" "100"]] (s/range-values sorted 2 1 4 2))
+        "by what the number is, not by how it is spelled — 100 sorts after 20")
+    (is (= ["名前" "点"] (first (s/range-values sorted 1 1 1 2))
+           ) "and the header, which was not in the range, did not move"))
+  (is (= [["a" "100"] ["b" "20"] ["c" "3"]]
+         (s/range-values (s/sort-range (scores) 2 1 4 2 2 false) 2 1 4 2)))
+  (is (= [["a" "100"] ["b" "20"] ["c" "3"]]
+         (s/range-values (s/sort-range (scores) 2 1 4 2 1) 2 1 4 2))
+      "text sorts as text"))
+
+(deftest a-range-with-a-formula-in-it-does-not-sort
+  ;; A formula moves with its row and its references do not: `=B2*2` in row
+  ;; 2 is still `=B2*2` in row 5, multiplying somebody else's number.
+  ;; Adjusting them is what a spreadsheet with a dependency graph does.
+  (let [tab (s/put-formula (scores) 3 2 "B2*2")]
+    (is (false? (s/sortable-range? tab 2 1 4 2)))
+    (is (= tab (s/sort-range tab 2 1 4 2 2)) "unchanged, not rearranged"))
+  (testing "a formula outside the range is not in the way"
+    ;; It points at addresses, and the values at those addresses are exactly
+    ;; what moved.
+    (let [tab (s/put-formula (scores) 6 1 "SUM(B2:B4)")]
+      (is (true? (s/sortable-range? tab 2 1 4 2)))
+      (is (= [["c" "3"] ["b" "20"] ["a" "100"]]
+             (s/range-values (s/sort-range tab 2 1 4 2 2) 2 1 4 2))))))
+
+(deftest everything-the-cell-carries-moves-with-it
+  ;; A red total is red because of the number in it, not because of the row
+  ;; it was on.
+  (let [tab (-> (scores) (s/put-cell-style 3 2 {:bold true}))
+        sorted (s/sort-range tab 2 1 4 2 2)]
+    (is (= {:bold true} (:sheets/style (s/get-cell sorted 4 2)))
+        "the 100 was bold and is still bold, on the row it moved to")
+    (is (nil? (:sheets/style (s/get-cell sorted 2 2))))))
+
+(deftest an-empty-cell-is-not-the-smallest-number
+  (let [tab (-> (scores) (s/put-cell 3 2 ""))
+        sorted (s/sort-range tab 2 1 4 2 2)]
+    (is (= [["c" "3"] ["b" "20"] ["a" ""]] (s/range-values sorted 2 1 4 2))
+        "empty last, which is what a column of amounts with a gap means")))
+
+(deftest a-sorted-range-holds-no-more-cells-than-it-did
+  ;; An empty cell in the range is stored as nothing rather than as an empty
+  ;; map, so sorting cannot grow the tab.
+  (let [tab (-> (s/tab "t" {})
+                (s/put-cell 1 1 "b") (s/put-cell 2 2 "a"))
+        sorted (s/sort-range tab 1 1 2 2 1)]
+    (is (= (count (:sheets/cells tab)) (count (:sheets/cells sorted))))))

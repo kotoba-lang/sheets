@@ -1,5 +1,5 @@
 (ns sheets.model
-  (:require [clojure.string]))
+  (:require [clojure.string :as str]))
 
 (defn workbook
   ([id] (workbook id {}))
@@ -92,6 +92,83 @@
      (vec
       (for [col (range col1 (inc col2))]
         (:sheets/value (get-cell tab row col)))))))
+
+(defn sortable-range?
+  "Whether the rows of this range can be reordered without changing what the
+  workbook says.
+
+  They cannot when the range holds a formula. A formula moves with its row
+  and its references do not: `=B2*2` in row 2 is still `=B2*2` after it
+  becomes row 5, so it now multiplies somebody else's number. Adjusting them
+  is what a spreadsheet with a dependency graph does, and this does not have
+  one — so the answer is no rather than a rearrangement that quietly
+  computes something else.
+
+  A formula elsewhere in the tab is fine: it points at addresses, and the
+  values at those addresses are exactly what moved."
+  [tab row1 col1 row2 col2]
+  (not-any? (fn [[row col]]
+              (:sheets/formula (get-cell tab row col)))
+            (for [row (range row1 (inc row2))
+                  col (range col1 (inc col2))]
+              [row col])))
+
+(defn- sort-key
+  "What a cell sorts by: its number when it holds one, its text otherwise.
+
+  Numbers before text, and empty last, which is what a person sorting a
+  column of amounts with a gap in it expects — an empty cell is not the
+  smallest amount, it is the absence of one."
+  [value]
+  (let [text (str value)
+        number (when-not (str/blank? text)
+                 #?(:clj (try (Double/parseDouble (str/trim text))
+                              (catch Exception _ nil))
+                    :cljs (let [n (js/parseFloat (str/trim text))]
+                            (when (and (not (js/isNaN n))
+                                       (re-matches #"\s*-?[0-9.eE+]+\s*" text))
+                              n))))]
+    (cond
+      (str/blank? text) [2 0 ""]
+      number [0 number ""]
+      :else [1 0 text])))
+
+(defn sort-range
+  "The rows of a range, reordered by one of its columns.
+
+  A whole row of the range moves together — sorting one column and leaving
+  the rest is the classic way to destroy a table, and no interface should be
+  able to ask for it. Everything the cell carries moves with it, styles
+  included: a red total is red because of the number in it, not because of
+  the row it was on.
+
+  Returns the tab unchanged when the range holds a formula; ask
+  `sortable-range?` first if you need to tell that from a range that was
+  already in order."
+  ([tab row1 col1 row2 col2 by-col] (sort-range tab row1 col1 row2 col2 by-col true))
+  ([tab row1 col1 row2 col2 by-col ascending?]
+   (if-not (sortable-range? tab row1 col1 row2 col2)
+     tab
+     (let [rows (vec (for [row (range row1 (inc row2))]
+                       (vec (for [col (range col1 (inc col2))]
+                              (get-cell tab row col)))))
+           at (- by-col col1)
+           ordered (cond->> (sort-by #(sort-key (:sheets/value (get % at))) rows)
+                     (not ascending?) reverse)]
+       (reduce (fn [acc [index cells]]
+                 (reduce (fn [acc' [offset cell]]
+                           (let [key (cell-key (+ row1 index) (+ col1 offset))]
+                             ;; An empty cell in the range is stored as
+                             ;; nothing rather than as an empty map, so a
+                             ;; sorted tab has the same cell count as the
+                             ;; one it came from.
+                             (if cell
+                               (assoc-in acc' [:sheets/cells key] cell)
+                               (update acc' :sheets/cells dissoc key))))
+                         acc
+                         (map-indexed vector cells)))
+               tab
+               (map-indexed vector (vec ordered)))))))
 
 (defn seed-workbook []
   (-> (workbook "gftd-sheets")
