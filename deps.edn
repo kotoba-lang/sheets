@@ -24,7 +24,7 @@
  {;; Bounded Kotoba profile (sheets.bounded-cells). :replace-paths/:replace-deps
   ;; so the compiler's classpath scan doesn't inherit the base :deps.
   :kotoba {:replace-paths ["src"]
-           :replace-deps {io.github.kotoba-lang/compiler
+           :replace-deps {io.github.kotoba-lang/amu
                           {:git/sha "f6ee539e23a967c25893361c4746746e623e8bd4"}}
            :main-opts ["-m" "kotoba.compiler.cli"]}
   :test {:extra-paths ["test"]
