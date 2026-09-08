@@ -34,7 +34,7 @@
   propagate: a sum over a range containing `#DIV/0!` is `#DIV/0!`, because
   the alternative is a total that silently omits a number nobody can see is
   missing."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [sheets.model :as model]))
 
 (def error-values
@@ -369,7 +369,7 @@
         ;; and a reference that is not one is `#NAME?`.
         (= :lparen (first (first (rest ts))))
         (let [[args ts] (parse-args (rest (rest ts)))]
-          [[:call (str/upper-case text) args] ts])
+          [[:call (str/upper text) args] ts])
 
         ;; `A1:B9` — a range, which only means anything inside a call.
         (= :colon (first (first (rest ts))))
@@ -480,7 +480,7 @@
     (nil? x) false
     (= "" (str x)) false
     (as-number x) (not (zero? (as-number x)))
-    (= "FALSE" (str/upper-case (str x))) false
+    (= "FALSE" (str/upper (str x))) false
     :else true))
 
 (defn- matches?
@@ -552,8 +552,8 @@
                     n (long (or (as-number (nth flat 2 nil)) 0))
                     from (min (max 0 (dec start)) (count t))]
                 (subs t from (min (+ from (max 0 n)) (count t))))
-        "UPPER" (str/upper-case (str (first flat)))
-        "LOWER" (str/lower-case (str (first flat)))
+        "UPPER" (str/upper (str (first flat)))
+        "LOWER" (str/lower (str (first flat)))
         "TRIM" (str/trim (str (first flat)))
         "CONCATENATE" (apply str (map str flat))
 

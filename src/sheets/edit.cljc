@@ -28,7 +28,7 @@
   title rather than an id, and guessing which resolves to which is how the
   three `names-of`/`charts-of` bugs happened. `unfollowed` says which charts
   were left alone so a caller can say so rather than discover it."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [sheets.formula :as formula]
             [sheets.model :as model]))
 

@@ -27,7 +27,7 @@
   editor shows. There is no evaluation here — `sheets` has no evaluator — so
   a formula's *value* is not something this could write even if the
   convention said to."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [sheets.model :as model]))
 
 (def ^:private needs-quoting #"[,\"\r\n]")

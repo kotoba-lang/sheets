@@ -1,5 +1,5 @@
 (ns sheets.csv-test
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [sheets.csv :as csv]
             [sheets.model :as m]
