@@ -20,7 +20,7 @@
   `read-workbook-envelope` gives back the projection unchanged, for callers
   that only want to look at a value. `rehydrate-workbook` turns it back into
   a workbook the model and `sheets.validate` will accept."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [transit.core :as transit]))
 
 (defn workbook-envelope

@@ -1,5 +1,5 @@
 (ns sheets.model
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn workbook
   ([id] (workbook id {}))
@@ -49,10 +49,10 @@
   "`A` → 1, `AA` → 27. The inverse of `column-name`, and nil for anything
   that is not all letters."
   [letters]
-  (let [s (clojure.string/upper-case (str letters))]
+  (let [s (str/upper (str letters))]
     (when (seq s)
       (reduce (fn [n ch]
-                (if-let [i (clojure.string/index-of alphabet ch)]
+                (if-let [i (str/index-of alphabet ch)]
                   (+ (* 26 n) (inc i))
                   (reduced nil)))
               0

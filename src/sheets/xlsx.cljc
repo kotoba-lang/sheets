@@ -55,7 +55,7 @@
   bugs found here — `column-name` emitting control characters and
   `column-number` reading every column as 1 — existed only under
   ClojureScript and passed every JVM test."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [ooxml.core :as ooxml]
             [sheets.chart :as chart]
             [sheets.csv :as csv]

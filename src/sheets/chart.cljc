@@ -25,7 +25,7 @@
   A range with no numbers in it. An empty plot area with axes is a picture
   of a chart, and it reads as *there is no data here* rather than as *this
   is broken*, which is the wrong answer when the range is simply wrong."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [sheets.formula :as formula]
             [sheets.model :as model]))
 

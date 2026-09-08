@@ -1,5 +1,10 @@
 {:paths ["src" "resources"]
- :deps {io.github.kotoba-lang/transit
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/transit
         ;; Advanced off 77e3ce7d, which was the last commit before the office
         ;; wire moved from Transit-tagged JSON to plain JSON. Staying there
         ;; made the round-trip test below pass without the projection ever
