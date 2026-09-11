@@ -33,7 +33,7 @@
   ;; code point on the JVM and 0 in ClojureScript. Under cljs that wrote
   ;; control characters into every cell reference and read every column as 1.
   ;; The JVM cannot see either — these assertions passed throughout — so what
-  ;; keeps them honest is `scripts/test-cljs.cljs` running them on the other
+  ;; keeps them honest is `scripts/test-cljs.cljk` running them on the other
   ;; host, not the assertions themselves.
   (is (every? #(re-matches #"[A-Z]+" (xlsx/column-name %)) [1 2 26 27 53 702 703 16384]))
   (is (= 2 (xlsx/column-number "B")) "not 1, which is what a zero code point gives")

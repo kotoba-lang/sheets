@@ -1,6 +1,6 @@
 {:schema "kotoba-sheets-migration/v1"
  :profile :sheets/bounded-cell-table-v1
- :legacy {:source "src/sheets/model.cljc"
+ :legacy {:source "src/sheets/model.cljk"
           :status :retained-general-oracle}
  :canonical {:kernel-and-conformance "src/sheets/bounded_cells.kotoba"}
  :domain
