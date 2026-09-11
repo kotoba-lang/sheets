@@ -13,11 +13,11 @@
 ;; and the `#?(:clj …)` tests — the zip round-trips — are simply absent here,
 ;; which is the correct outcome rather than a gap.
 ;;
-;;   nbb --classpath "$(clojure -Spath):test" scripts/test-cljs.cljs
+;;   nbb --classpath "$(clojure -Spath):test" scripts/test-cljs.cljk
 ;;
 ;; or, from a checkout with the deps resolved:
 ;;
-;;   scripts/test-cljs.cljs
+;;   scripts/test-cljs.cljk
 
 (require '[clojure.test :as t]
          'sheets.chart-test
