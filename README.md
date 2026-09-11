@@ -267,8 +267,8 @@ one of them now.
 ## Test
 
 ```bash
-clojure -X:test                                                  # JVM
-nbb --classpath "src:test:$(clojure -Spath)" scripts/test-cljs.cljk   # ClojureScript
+kbb -X:test                                                  # JVM
+kbb --backend sci --classpath "src:test:$(kbb -Spath)" scripts/test-cljs.cljk   # ClojureScript
 ```
 
 Run both. This is a `.cljc` library and the JVM suite passed for as long as

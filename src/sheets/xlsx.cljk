@@ -50,7 +50,7 @@
 
   ## Both hosts, actually run
 
-  This is `.cljc`, and `clojure -M:test` exercises one host. `scripts/
+  This is `.cljc`, and `kbb -M:test` exercises one host. `scripts/
   test-cljs.cljs` runs the same namespaces under nbb, because the first two
   bugs found here — `column-name` emitting control characters and
   `column-number` reading every column as 1 — existed only under
