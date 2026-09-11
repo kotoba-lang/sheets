@@ -1,7 +1,7 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; The same test namespaces, on the other host.
 ;;
-;; `clojure -M:test` runs them on the JVM, which is where they were written
+;; `kbb -M:test` runs them on the JVM, which is where they were written
 ;; and where they all passed while `column-name` and `column-number` were
 ;; both wrong under ClojureScript. `(int \A)` is a code point on the JVM and
 ;; 0 in cljs, so a workbook written from nbb had control characters for cell
@@ -13,7 +13,7 @@
 ;; and the `#?(:clj …)` tests — the zip round-trips — are simply absent here,
 ;; which is the correct outcome rather than a gap.
 ;;
-;;   nbb --classpath "$(clojure -Spath):test" scripts/test-cljs.cljk
+;;   kbb --backend sci --classpath "$(kbb -Spath):test" scripts/test-cljs.cljk
 ;;
 ;; or, from a checkout with the deps resolved:
 ;;
