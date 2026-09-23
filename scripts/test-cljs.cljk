@@ -19,7 +19,7 @@
 ;;
 ;;   scripts/test-cljs.cljk
 
-(require '[clojure.test :as t]
+(require '[kotoba.test :as t]
          'sheets.chart-test
          'sheets.csv-test
          'sheets.formula-test
