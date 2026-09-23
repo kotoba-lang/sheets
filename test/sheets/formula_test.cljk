@@ -1,5 +1,5 @@
 (ns sheets.formula-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [sheets.formula :as f]
             [sheets.model :as m]))
 

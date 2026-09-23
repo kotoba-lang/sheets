@@ -5,7 +5,7 @@
   moves rows arbitrarily and no rule keeps a reference on the same value.
   These are the edits where a rule exists, so the test is whether it is the
   one every spreadsheet uses."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [sheets.edit :as edit]
             [sheets.formula :as formula]
             [sheets.model :as m]))

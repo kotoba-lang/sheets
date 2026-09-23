@@ -1,6 +1,6 @@
 (ns sheets.xlsx-test
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [ooxml.core :as ooxml]
             [sheets.model :as m]
             [sheets.xlsx :as xlsx]))

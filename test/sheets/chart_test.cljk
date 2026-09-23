@@ -1,6 +1,6 @@
 (ns sheets.chart-test
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [sheets.chart :as chart]
             [sheets.model :as m]))
 
