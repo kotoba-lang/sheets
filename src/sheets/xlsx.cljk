@@ -55,7 +55,7 @@
   bugs found here — `column-name` emitting control characters and
   `column-number` reading every column as 1 — existed only under
   ClojureScript and passed every JVM test."
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [ooxml.core :as ooxml]
             [sheets.chart :as chart]
             [sheets.csv :as csv]
@@ -564,7 +564,7 @@
        (with-open [zip (ZipOutputStream. out)]
          (doseq [path (sort-by ooxml/part-sort-key (keys files))]
            (.putNextEntry zip (ZipEntry. ^String path))
-           (.write zip (.getBytes ^String (get files path) "UTF-8"))
+           (.write zip (kbytes/utf8-bytes ^String (get files path)))
            (.closeEntry zip)))
        (.toByteArray out))))
 
@@ -1026,7 +1026,7 @@
              (loop []
                (let [n (.read zip buf)]
                  (when (pos? n) (.write out buf 0 n) (recur))))
-             (recur (assoc acc (.getName entry) (String. (.toByteArray out) "UTF-8"))))
+             (recur (assoc acc (.getName entry) (kbytes/utf8-string (.toByteArray out)))))
            acc)))))
 
 #?(:clj
